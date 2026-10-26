@@ -1,0 +1,64 @@
+{
+  "name": "tflix-chromium47",
+  "appName": "TFlix C47",
+  "version": "2.0.5-c47.1",
+  "description": "TFlix is a 10-foot streaming web app for Samsung Smart TVs running TizenBrew, featuring TMDB discovery and multi-embed streaming.",
+  "packageType": "app",
+  "appPath": "dist/index.html",
+  "main": "dist/index.html",
+  "serviceFile": "service/hlsRelay.js",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "relay": "node service/hlsRelay.js",
+    "build": "vite build",
+    "preview": "vite preview",
+    "prepublishOnly": "npm run build",
+    "test": "node scripts/check-compat.cjs"
+  },
+  "author": "Zyrex",
+  "keys": [
+    "MediaPlayPause",
+    "MediaPlay",
+    "MediaPause",
+    "MediaStop",
+    "MediaFastForward",
+    "MediaRewind",
+    "MediaTrackNext",
+    "MediaTrackPrevious"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/misbeliever/tflix-chromium47"
+  },
+  "bugs": {
+    "url": "https://github.com/Zyrecx/TFlix/issues"
+  },
+  "homepage": "https://github.com/Zyrecx/TFlix#readme",
+  "keywords": [
+    "tizenbrew",
+    "tizen",
+    "samsung",
+    "tv",
+    "tmdb",
+    "streaming"
+  ],
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-legacy": "^6.1.1",
+    "acorn": "^8.19.0",
+    "lucide-static": "^1.39.0",
+    "postcss-custom-properties": "^15.0.4",
+    "terser": "^5.51.2",
+    "vite": "^6.2.0"
+  },
+  "dependencies": {
+    "abortcontroller-polyfill": "^1.7.8",
+    "hls.js": "^1.7.1",
+    "qrcode": "^1.5.4"
+  },
+  "private": true
+}

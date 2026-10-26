@@ -1,0 +1,30 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const vm = require('node:vm');
+const acorn = require('acorn');
+const path = require('node:path');
+const root = path.resolve(__dirname, '..');
+const read = name => fs.readFileSync(path.join(root, name), 'utf8');
+acorn.parse(read('service/hlsRelay.js'), {ecmaVersion:2019});
+const html = read('dist/index.html');
+assert(/<script\b(?![^>]*type=["']module)[^>]*(?:src=|nomodule)/i.test(html), 'BLACK-SCREEN REPRO: Chromium 47 needs a classic-script entry');
+const legacyFiles = fs.readdirSync(path.join(root, 'dist/assets')).filter(f => f.endsWith('-legacy.js'));
+assert(legacyFiles.length >= 3, 'entry, lazy player and polyfills required');
+for (const file of legacyFiles) acorn.parse(read('dist/assets/' + file), {ecmaVersion:5});
+const cssFiles = fs.readdirSync(path.join(root, 'dist/assets')).filter(f => f.endsWith('.css'));
+assert(cssFiles.length, 'stylesheet must ship alongside JS');
+for (const file of cssFiles) {
+ const css=read('dist/assets/'+file);
+ assert(!/var\(--|display:grid|\binset:|\bgap:|aspect-ratio:/.test(css), file);
+}
+for (const match of html.matchAll(/(?:src|data-src|href)="\.\/([^"#]+)"/g)) assert(fs.existsSync(path.join(root,'dist',match[1])), match[1]);
+assert(!read('src/nav/spatialNav.js').includes('.scrollIntoView('));
+const src = read('src/store/storage.js').replace('export const storage', 'const storage');
+const values = {'other_app':'preserve', 'tflix_tmdb_api_key':'preserve-original', 'tflix_c47_tmdb_api_key':'remove'};
+const localStorage = {getItem:k=>values[k],setItem:(k,v)=>values[k]=v,removeItem:k=>delete values[k]};
+const storage=vm.runInNewContext(src+'\nstorage',{localStorage:new Proxy(localStorage,{ownKeys:()=>Reflect.ownKeys(values), getOwnPropertyDescriptor:()=>({enumerable:true,configurable:true})})});
+storage.clearAllData();
+assert.equal(values.other_app,'preserve');
+assert.equal(values.tflix_tmdb_api_key,'preserve-original');
+assert.equal(values.tflix_c47_tmdb_api_key,undefined);
+console.log('PASS: classic startup, ES5 legacy chunks, shipped CSS/assets, panel API and isolated reset');

@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="referrer" content="no-referrer" />
+  <title>TFlix C47 - Smart TV Streaming</title>
+  <!-- Every cold start hits both hosts for the home screen (API call, then
+       poster images) — preconnecting overlaps their DNS/TLS handshakes with
+       app boot instead of paying for them serially once the first fetch
+       actually fires, which matters more on TV network stacks than desktop. -->
+  <link rel="preconnect" href="https://api.themoviedb.org" />
+  <link rel="preconnect" href="https://image.tmdb.org" crossorigin />
+</head>
+<body>
+  <div id="app"><p style="padding: 48px; color: white; background: #09090b; font: 24px Arial;">Starting TFlix C47…</p></div>
+  <script type="module" src="./src/app.js"></script>
+</body>
+</html>

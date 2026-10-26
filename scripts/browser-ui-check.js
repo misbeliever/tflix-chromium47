@@ -1,0 +1,30 @@
+async () => {
+ const assert = (ok, why) => {if (!ok) throw new Error(why)};
+ assert(document.querySelector('.sidebar'), 'blank-screen regression: missing shell');
+ assert(document.body.textContent.includes('Welcome to TFlix'), 'first-run setup');
+ document.getElementById('tour-next-btn').click();
+ assert(document.getElementById('tour-api-key-input') || document.querySelector('input'), 'key entry step');
+ var columns=document.querySelector('.c47-two-column');
+ assert(columns && getComputedStyle(columns).display==='flex', 'legacy setup columns');
+ document.getElementById('tour-skip-btn').click();
+ assert(document.body.textContent.includes('TMDB API Key Required'), 'missing-key screen instead of black');
+ document.getElementById('nav-settings-btn').click();
+ assert(document.body.textContent.includes('Settings'), 'settings opens');
+ await new Promise(r=>setTimeout(r,60));
+ window.dispatchEvent(new KeyboardEvent('keydown',{keyCode:10009,bubbles:true}));
+ assert(!document.querySelector('.modal-overlay'), 'Return closes settings');
+ document.getElementById('nav-search-btn').click();
+ assert(document.querySelector('input'), 'search opens');
+ await new Promise(r=>setTimeout(r,60));
+ window.dispatchEvent(new KeyboardEvent('keydown',{keyCode:10009,bubbles:true}));
+ await new Promise(r=>setTimeout(r,60));
+ window.dispatchEvent(new KeyboardEvent('keydown',{keyCode:10009,bubbles:true}));
+ assert(document.getElementById('exit-confirm-cancel'), 'Return opens exit confirmation');
+ document.getElementById('exit-confirm-cancel').click();
+ assert(!document.getElementById('exit-confirm-cancel'), 'exit cancel returns to app');
+ assert(getComputedStyle(document.body).backgroundColor==='rgb(9, 9, 11)', 'fixed theme values');
+ assert(typeof AbortController==='function' && typeof URLSearchParams==='function', 'web polyfills loaded');
+ assert(typeof NodeList.prototype.forEach==='function', 'NodeList polyfill loaded');
+ assert(window.c47Errors.length===0, window.c47Errors.join('; '));
+ return {pass:true,legacy:true,errors:window.c47Errors,background:getComputedStyle(document.body).backgroundColor};
+}

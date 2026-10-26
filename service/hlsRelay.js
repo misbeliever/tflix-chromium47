@@ -1,0 +1,1114 @@
+/**
+ * TFlix local HLS relay + provider-pack pairing server.
+ *
+ * Runs as a TizenBrew `serviceFile` — a plain Node.js process outside the
+ * webview's browser sandbox. Browser `fetch`/XHR always attaches an `Origin`
+ * header on cross-origin requests, and several direct-stream provider APIs
+ * either omit CORS headers entirely or actively reject requests that carry
+ * any `Origin` header. Node's http/https client sends neither, so requests
+ * made here succeed where the webview's would not.
+ *
+ * IMPORTANT — this file must stay a single, self-contained CommonJS script.
+ * TizenBrew's serviceLauncher.js does NOT run this as a normal Node module:
+ * it fetches only this one file's raw text from jsDelivr and executes it
+ * with `vm.runInContext(script, sandbox)` (see
+ * TizenBrew/service-nextgen/service/utils/serviceLauncher.js). That means:
+ *   - No `import`/`export` — `vm.runInContext` compiles a classic script,
+ *     not a module; top-level `import` is a SyntaxError there.
+ *   - No dynamic `import()` either — it throws "A dynamic import callback
+ *     was not specified" unless the host passes `importModuleDynamically`,
+ *     which TizenBrew's launcher does not. Provider-pack files are loaded
+ *     with `require()` + manual `require.cache` invalidation instead (see
+ *     loadCommunityProviders below).
+ *   - No `require('./lib/whatever.js')` to sibling files — the `require`
+ *     the sandbox exposes is TizenBrew's own, closure-bound to *its*
+ *     install directory, not this file's (which doesn't exist on disk in
+ *     the first place — only this one file's text was ever fetched). Any
+ *     helper code has to live in this file, not a separate module.
+ *   - No `__dirname`/`__filename` — those are only injected by Node's
+ *     normal CommonJS module wrapper, which `vm.runInContext` bypasses.
+ *   - Confirmed live on-device: the sandbox's `process.version` is v12.4.0
+ *     (Tizen's bundled Node), so ES2019-ish syntax (async/await, object
+ *     spread, optional catch binding, template literals) is fine, but
+ *     optional chaining (`?.`), nullish coalescing (`??`), `crypto.randomInt`
+ *     (needs 14.10+) and `fs.rmSync` (needs 14.14+) are NOT available and
+ *     must be avoided/polyfilled.
+ *
+ * Providers are plugins, loaded from a community pack a user installs via
+ * the pairing flow (see loadCommunityProviders/installPack below). This
+ * repo ships with none built in; all direct providers come from a provider
+ * pack the user installs (see docs/PROVIDER_PACKS.md). Each provider
+ * exports (via `module.exports`, not `export default` — see the note on
+ * the sandbox above) { id, name, description, resolve(ctx, http) }.
+ *
+ * This server binds to all interfaces (not just loopback) so the pairing
+ * page can be reached from a phone on the same wifi. Config-mutating actions
+ * (installing a provider pack) are gated behind a single-use pairing code
+ * shown only on the TV screen — see the pairing section below for that
+ * boundary.
+ */
+
+'use strict';
+
+var http = require('http');
+var https = require('https');
+var os = require('os');
+var fs = require('fs');
+var path = require('path');
+var crypto = require('crypto');
+var URL = require('url').URL;
+
+var PORT = 47994;
+// Installed provider packs must live outside the package's own install
+// directory — TizenBrew appears to serve npm modules from a location that
+// isn't writable, so writing here (as an earlier version did) threw
+// synchronously during startup and silently killed the whole relay before
+// server.listen() ever ran. os.tmpdir() is always writable.
+var DATA_DIR = path.join(os.tmpdir(), 'tflix-c47-relay');
+var COMMUNITY_DIR = path.join(DATA_DIR, 'providers', 'community');
+var PACK_CONFIG_PATH = path.join(DATA_DIR, 'data', 'providerPack.json');
+
+// ---------------------------------------------------------------------------
+// HTTP client for provider plugins — plain Node http/https, no browser
+// `Origin` header is ever attached, which is the whole reason this exists on
+// the serviceFile side rather than in the webview.
+// ---------------------------------------------------------------------------
+
+var DESKTOP_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+
+// `opts` is either a plain headers map (legacy call shape — every existing
+// provider file and fetchJson/fetchText call it this way) or a structured
+// { method, headers, body } object for a non-GET request. Discriminated by
+// presence of method/body/headers keys rather than a separate parameter, so
+// old pack files keep working unchanged.
+function fetchRaw(targetUrl, opts, redirects) {
+  if (opts === undefined) opts = {};
+  if (redirects === undefined) redirects = 5;
+  var structured = Boolean(opts && (opts.method || opts.body !== undefined || opts.headers));
+  var headers = structured ? (opts.headers || {}) : opts;
+  var method = structured ? (opts.method || 'GET') : 'GET';
+  var body = structured ? opts.body : undefined;
+  return new Promise(function (resolve, reject) {
+    var u;
+    try {
+      u = new URL(targetUrl);
+    } catch (e) {
+      reject(new Error('Invalid URL: ' + targetUrl));
+      return;
+    }
+    var lib = u.protocol === 'http:' ? http : https;
+    var reqHeaders = Object.assign({ 'User-Agent': DESKTOP_UA }, headers);
+    if (body !== undefined && reqHeaders['Content-Length'] === undefined) {
+      reqHeaders['Content-Length'] = Buffer.byteLength(typeof body === 'string' ? body : String(body));
+    }
+    var req = lib.request(u, { method: method, headers: reqHeaders }, function (res) {
+      if ([301, 302, 303, 307, 308].indexOf(res.statusCode) !== -1 && res.headers.location && redirects > 0) {
+        res.resume();
+        var nextUrl = new URL(res.headers.location, targetUrl).toString();
+        fetchRaw(nextUrl, opts, redirects - 1).then(resolve, reject);
+        return;
+      }
+      var chunks = [];
+      res.on('data', function (c) { chunks.push(c); });
+      res.on('end', function () {
+        resolve({ statusCode: res.statusCode, headers: res.headers, body: Buffer.concat(chunks), finalUrl: targetUrl });
+      });
+      res.on('error', reject);
+    });
+    req.on('error', reject);
+    req.setTimeout(15000, function () { req.destroy(new Error('Upstream request timed out')); });
+    if (body !== undefined) req.write(body);
+    req.end();
+  });
+}
+
+// Used only by /hls. Unlike fetchRaw (which always buffers the full body —
+// needed for JSON/HTML/playlist callers that must inspect the whole
+// response), this pipes a non-playlist upstream response straight through
+// to the client as bytes arrive, and forwards the client's Range header.
+// fetchRaw's full-buffer-then-respond behavior was fine for HLS segments
+// (small) but for a large direct-file provider response (e.g. a
+// progressive-mp4 native-catalog pack) it meant zero bytes reached the
+// player until the *entire* file had downloaded server-side — measured at
+// ~38s for a 130MB file, well past VideoPlayer.js's 15s stream-timeout
+// watchdog, which then fired an incorrect "Timeout (Server slow/offline)"
+// fallback on a stream that was actually fine, just not yet fully buffered.
+// A playlist still needs full buffering (must rewrite every URL inside it
+// before it's valid to send), so that path is unchanged.
+function streamProxy(targetUrl, referer, clientReq, res, redirects) {
+  if (redirects === undefined) redirects = 5;
+  return new Promise(function (resolve, reject) {
+    var u;
+    try {
+      u = new URL(targetUrl);
+    } catch (e) {
+      reject(new Error('Invalid URL: ' + targetUrl));
+      return;
+    }
+    var lib = u.protocol === 'http:' ? http : https;
+    var reqHeaders = Object.assign({ 'User-Agent': DESKTOP_UA }, referer ? { Referer: referer } : {});
+    if (clientReq.headers['range']) reqHeaders['Range'] = clientReq.headers['range'];
+    var req = lib.request(u, { method: 'GET', headers: reqHeaders }, function (upstream) {
+      if ([301, 302, 303, 307, 308].indexOf(upstream.statusCode) !== -1 && upstream.headers.location && redirects > 0) {
+        upstream.resume();
+        var nextUrl = new URL(upstream.headers.location, targetUrl).toString();
+        streamProxy(nextUrl, referer, clientReq, res, redirects - 1).then(resolve, reject);
+        return;
+      }
+      if (upstream.statusCode >= 400) {
+        res.statusCode = upstream.statusCode;
+        res.end('upstream ' + upstream.statusCode);
+        upstream.resume();
+        resolve();
+        return;
+      }
+      var ct = (upstream.headers['content-type'] || '').toLowerCase();
+      var looksLikePlaylist = ct.indexOf('mpegurl') !== -1 || targetUrl.split('?')[0].toLowerCase().slice(-5) === '.m3u8';
+      if (looksLikePlaylist) {
+        var chunks = [];
+        upstream.on('data', function (c) { chunks.push(c); });
+        upstream.on('end', function () {
+          res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
+          res.end(rewritePlaylist(Buffer.concat(chunks).toString('utf-8'), targetUrl, referer));
+          resolve();
+        });
+        upstream.on('error', reject);
+        return;
+      }
+      res.statusCode = upstream.statusCode;
+      if (upstream.headers['content-type']) res.setHeader('Content-Type', upstream.headers['content-type']);
+      if (upstream.headers['content-length']) res.setHeader('Content-Length', upstream.headers['content-length']);
+      if (upstream.headers['content-range']) res.setHeader('Content-Range', upstream.headers['content-range']);
+      if (upstream.headers['accept-ranges']) res.setHeader('Accept-Ranges', upstream.headers['accept-ranges']);
+      upstream.pipe(res);
+      upstream.on('end', resolve);
+      upstream.on('error', reject);
+    });
+    req.on('error', reject);
+    req.setTimeout(15000, function () { req.destroy(new Error('Upstream request timed out')); });
+    req.end();
+  });
+}
+
+async function fetchJson(url, headers) {
+  var r = await fetchRaw(url, headers);
+  if (r.statusCode >= 400 || r.body.length === 0) {
+    throw new Error('Upstream ' + url + ' returned HTTP ' + r.statusCode + ' with ' + r.body.length + ' bytes');
+  }
+  try {
+    return JSON.parse(r.body.toString('utf-8'));
+  } catch (e) {
+    throw new Error('Upstream ' + url + ' returned non-JSON response (HTTP ' + r.statusCode + ')');
+  }
+}
+
+async function fetchText(url, headers) {
+  var r = await fetchRaw(url, headers);
+  if (r.statusCode >= 400) {
+    throw new Error('Upstream ' + url + ' returned HTTP ' + r.statusCode);
+  }
+  return r.body.toString('utf-8');
+}
+
+// Passed as the second argument to every provider's resolve(ctx, http) — the
+// one stable, documented surface a pack author can depend on.
+var providerHttp = { fetchRaw: fetchRaw, fetchJson: fetchJson, fetchText: fetchText };
+
+// ---------------------------------------------------------------------------
+// Pairing: short-lived codes for the phone -> TV handoff. A code authorizes
+// exactly one config-mutating action, then is consumed. This is the actual
+// security boundary between "device on the same wifi" and "can make the
+// relay install and execute a JS file" (or, for the tmdb_key kind, read back
+// an API key the TV then trusts).
+// `kind` distinguishes what the phone page collects: 'provider_pack' (a
+// manifest URL, default) or 'tmdb_key' (a raw TMDB API key string).
+// ---------------------------------------------------------------------------
+
+var CODE_TTL_MS = 5 * 60 * 1000;
+var pairingCodes = new Map(); // code -> { expiresAt, used, kind, result }
+
+function generatePairingCode() {
+  // crypto.randomInt needs Node 14.10+; this sandbox runs v12.4.0. randomBytes
+  // has been available since early Node and gives an equivalent CSPRNG source.
+  var n = crypto.randomBytes(4).readUInt32BE(0) % 1000000;
+  return String(n).padStart(6, '0');
+}
+
+function startPairing(kind) {
+  if (kind === undefined) kind = 'provider_pack';
+  // Clear any previous outstanding codes — only one pairing session at a time.
+  pairingCodes.clear();
+  var code = generatePairingCode();
+  pairingCodes.set(code, { expiresAt: Date.now() + CODE_TTL_MS, used: false, kind: kind, result: null });
+  return { code: code, expiresAt: Date.now() + CODE_TTL_MS };
+}
+
+function isCodeValid(code) {
+  var entry = pairingCodes.get(code);
+  return Boolean(entry && !entry.used && entry.expiresAt > Date.now());
+}
+
+function getPairingKind(code) {
+  var entry = pairingCodes.get(code);
+  return entry ? entry.kind : null;
+}
+
+function consumeCode(code) {
+  var entry = pairingCodes.get(code);
+  if (!entry || entry.used || entry.expiresAt <= Date.now()) return false;
+  entry.used = true;
+  return true;
+}
+
+function setPairingResult(code, result) {
+  var entry = pairingCodes.get(code);
+  if (entry) entry.result = result;
+}
+
+function getPairingStatus(code) {
+  var entry = pairingCodes.get(code);
+  if (!entry) return { state: 'unknown' };
+  if (entry.expiresAt <= Date.now() && !entry.used) return { state: 'expired' };
+  if (!entry.used) return { state: 'pending' };
+  return { state: 'done', result: entry.result };
+}
+
+// ---------------------------------------------------------------------------
+// Best-effort Wi-Fi SSID lookup, shown next to the pairing QR code so the
+// user can confirm their phone is on the same network — a pure UX nicety,
+// not a dependency. Deliberately does NOT use child_process: on at least one
+// real TV (Tizen, Node v12.4.0 sandbox) spawning a subprocess here brought
+// down the entire TizenBrew background process — not just this request —
+// which stayed dead until TizenBrew itself was force-restarted. That's a
+// process-level crash outside JS's ability to catch (try/catch around
+// execFile did not help), so the fix is to never spawn a child process from
+// inside this vm sandbox at all, not just handle the failure more gracefully.
+// getWifiSsid() always resolves null; wifiHint() already renders nothing for
+// a null ssid, so pairing still works, just without the "you're on wifi X"
+// hint.
+// ---------------------------------------------------------------------------
+
+async function getWifiSsid() {
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Provider packs: externally-hosted bundles of provider plugins (a manifest
+// + one .js file per provider), fetched over plain HTTP. Trust model:
+// installing a pack means this process will require() and execute arbitrary
+// JS from that URL — the pairing flow above is what gates this.
+// ---------------------------------------------------------------------------
+
+function ensurePackDirs() {
+  fs.mkdirSync(COMMUNITY_DIR, { recursive: true });
+  fs.mkdirSync(path.dirname(PACK_CONFIG_PATH), { recursive: true });
+}
+
+function isSafeManifestUrl(url) {
+  var u;
+  try {
+    u = new URL(url);
+  } catch (e) {
+    return false;
+  }
+  if (['http:', 'https:'].indexOf(u.protocol) === -1) return false;
+  var host = u.hostname.toLowerCase();
+  // Block loopback (would target the relay's own /resolve /pair etc, a
+  // self-request loop) and link-local/metadata addresses. Ordinary private
+  // LAN hosts (192.168.x, 10.x) are allowed on purpose — self-hosting a pack
+  // on your own network is a legitimate, expected use of this feature.
+  if (host === 'localhost' || host === '127.0.0.1' || host === '0.0.0.0' || host === '::1') return false;
+  if (host.indexOf('169.254.') === 0 || host === '169.254.169.254') return false;
+  return true;
+}
+
+// Multiple packs live side by side, each in its own subdirectory of
+// COMMUNITY_DIR keyed by a short hash of its manifest URL — installing one
+// pack must never touch another's files. PACK_CONFIG_PATH holds a map of
+// that hash -> { manifestUrl, name, installedAt, providerIds }.
+function packKey(manifestUrl) {
+  return crypto.createHash('sha1').update(manifestUrl).digest('hex').slice(0, 16);
+}
+
+function loadPackConfig() {
+  ensurePackDirs();
+  if (!fs.existsSync(PACK_CONFIG_PATH)) return { packs: {} };
+  try {
+    var parsed = JSON.parse(fs.readFileSync(PACK_CONFIG_PATH, 'utf-8'));
+    // Tolerate the old single-pack shape ({url,name,installedAt,providerIds})
+    // from before packs were keyed — treat it as one entry rather than
+    // silently discarding whatever pack the user already had installed.
+    if (parsed && !parsed.packs && parsed.url) {
+      var legacyKey = packKey(parsed.url);
+      var legacy = {};
+      legacy[legacyKey] = { manifestUrl: parsed.url, name: parsed.name, installedAt: parsed.installedAt, providerIds: parsed.providerIds };
+      return { packs: legacy };
+    }
+    return (parsed && parsed.packs) ? parsed : { packs: {} };
+  } catch (e) {
+    return { packs: {} };
+  }
+}
+
+function savePackConfig(config) {
+  ensurePackDirs();
+  fs.writeFileSync(PACK_CONFIG_PATH, JSON.stringify(config, null, 2));
+}
+
+function packDirFor(manifestUrl) {
+  return path.join(COMMUNITY_DIR, packKey(manifestUrl));
+}
+
+function clearDirFiles(dir) {
+  if (!fs.existsSync(dir)) return;
+  var files = fs.readdirSync(dir);
+  for (var i = 0; i < files.length; i++) {
+    var f = files[i];
+    // fs.rmSync needs Node 14.14+; this sandbox runs v12.4.0 — these are
+    // always plain files (never directories), so unlinkSync is equivalent.
+    if (f.slice(-3) === '.js') fs.unlinkSync(path.join(dir, f));
+  }
+}
+
+// Loads a just-written community provider file with require() (dynamic
+// import() throws unconditionally in this vm sandbox — see the file header)
+// and forces a fresh read via require.cache invalidation, since the same
+// path can be reused across installs.
+function requireFresh(absPath) {
+  var resolved = require.resolve(absPath);
+  delete require.cache[resolved];
+  return require(resolved);
+}
+
+/**
+ * Fetches a manifest + its provider files and writes them into this pack's
+ * own subdirectory (named after a hash of manifestUrl), leaving every other
+ * installed pack untouched. Reinstalling the same manifestUrl replaces just
+ * that pack's own files (e.g. picking up an update). Returns
+ * { name, installed: [ids], errors: [{id, error}] }.
+ */
+async function installPack(manifestUrl) {
+  if (!isSafeManifestUrl(manifestUrl)) {
+    throw new Error('Refusing to install from that URL (must be a public http/https host)');
+  }
+  var url = manifestUrl.slice(-5) === '.json' ? manifestUrl : manifestUrl.replace(/\/$/, '') + '/manifest.json';
+  var manifest = await fetchJson(url);
+  if (!manifest || !Array.isArray(manifest.providers)) {
+    throw new Error('Manifest must have a "providers" array');
+  }
+
+  ensurePackDirs();
+  var dir = packDirFor(manifestUrl);
+  fs.mkdirSync(dir, { recursive: true });
+  clearDirFiles(dir);
+
+  // Optional `manifest.shared` — plain filenames (e.g. "hosts.js") fetched
+  // and written into this pack's own directory *unvalidated* (no id/resolve
+  // check), purely so provider files in the same pack can `require('./x')`
+  // them for code reuse across multiple site providers in one pack (e.g. a
+  // shared video-host extractor library). This works because, unlike
+  // hlsRelay.js itself, provider files ARE loaded via real `require()` from
+  // real files on disk (see requireFresh) — sibling requires are fine here.
+  // loadCommunityProviders already tolerates non-provider .js files sitting
+  // in a pack dir (skips them with a warning), so no loader-side change was
+  // needed for these to coexist with real providers.
+  var sharedFiles = Array.isArray(manifest.shared) ? manifest.shared : [];
+  for (var s = 0; s < sharedFiles.length; s++) {
+    var sharedName = sharedFiles[s];
+    if (typeof sharedName !== 'string' || !/^[\w.-]+\.js$/.test(sharedName)) {
+      throw new Error('manifest.shared entries must be plain "name.js" filenames');
+    }
+    var sharedUrl = new URL(sharedName, url).toString();
+    var sharedCode = await fetchText(sharedUrl);
+    var sharedDest = path.join(dir, sharedName);
+    fs.writeFileSync(sharedDest, sharedCode);
+    try { delete require.cache[require.resolve(sharedDest)]; } catch (e) { /* not cached yet */ }
+  }
+
+  var installed = [];
+  var errors = [];
+  for (var i = 0; i < manifest.providers.length; i++) {
+    var entry = manifest.providers[i];
+    try {
+      if (!entry || !entry.id || !entry.file) throw new Error('manifest entry missing id/file');
+      var fileUrl = new URL(entry.file, url).toString();
+      var code = await fetchText(fileUrl);
+      var destPath = path.join(dir, entry.id + '.js');
+      fs.writeFileSync(destPath, code);
+
+      // Validate it actually loads and exposes the right shape before
+      // counting it as installed — catches syntax errors / bad exports early.
+      var mod = requireFresh(destPath);
+      var provider = mod && mod.default ? mod.default : mod; // tolerate `export default` transpiled output too
+      if (!provider || !provider.id || typeof provider.resolve !== 'function') {
+        fs.unlinkSync(destPath);
+        throw new Error('provider file did not export {id, resolve} via module.exports');
+      }
+      installed.push(entry.id);
+    } catch (e) {
+      errors.push({ id: (entry && entry.id) || '(unknown)', error: e.message || String(e) });
+    }
+  }
+
+  var config = loadPackConfig();
+  config.packs[packKey(manifestUrl)] = {
+    manifestUrl: manifestUrl,
+    name: manifest.name || 'Unnamed pack',
+    installedAt: new Date().toISOString(),
+    providerIds: installed
+  };
+  savePackConfig(config);
+
+  return { name: manifest.name || 'Unnamed pack', installed: installed, errors: errors };
+}
+
+/**
+ * Removes one installed pack's files and config entry, leaving every other
+ * pack untouched.
+ */
+function uninstallPack(manifestUrl) {
+  var dir = packDirFor(manifestUrl);
+  clearDirFiles(dir);
+  if (fs.existsSync(dir)) {
+    try { fs.rmdirSync(dir); } catch (e) { /* not empty (unexpected non-.js file) — leave it */ }
+  }
+  var config = loadPackConfig();
+  var key = packKey(manifestUrl);
+  var existed = Boolean(config.packs[key]);
+  delete config.packs[key];
+  savePackConfig(config);
+  return existed;
+}
+
+function loadCommunityProviders() {
+  var found = [];
+  if (!fs.existsSync(COMMUNITY_DIR)) return found;
+  var config = loadPackConfig();
+  var entries = fs.readdirSync(COMMUNITY_DIR, { withFileTypes: true });
+  for (var e = 0; e < entries.length; e++) {
+    if (!entries[e].isDirectory()) continue; // skip stray files from the pre-multi-pack layout
+    var packEntry = config.packs[entries[e].name];
+    var dir = path.join(COMMUNITY_DIR, entries[e].name);
+    var files = fs.readdirSync(dir).filter(function (f) { return f.slice(-3) === '.js'; });
+    for (var i = 0; i < files.length; i++) {
+      var file = files[i];
+      try {
+        var mod = requireFresh(path.join(dir, file));
+        var provider = mod && mod.default ? mod.default : mod;
+        if (!provider || !provider.id || typeof provider.resolve !== 'function') {
+          console.warn('[hlsRelay] Skipping ' + file + ': missing id/resolve export');
+          continue;
+        }
+        // Tag with source pack info so /providers can group by source in
+        // the Settings UI — not part of the pack-authoring contract itself.
+        provider._packManifestUrl = packEntry ? packEntry.manifestUrl : null;
+        provider._packName = packEntry ? packEntry.name : null;
+        found.push(provider);
+      } catch (err) {
+        console.error('[hlsRelay] Failed to load provider ' + file + ':', err.message);
+      }
+    }
+  }
+  return found;
+}
+
+function loadAllProviders() {
+  try {
+    fs.mkdirSync(COMMUNITY_DIR, { recursive: true });
+  } catch (e) {
+    // Degrade to "no community providers" rather than take the whole relay
+    // down — this only blocks pack installs, not builtin providers/playback.
+    console.error('[hlsRelay] Could not create community providers dir:', e.message);
+  }
+
+  var community = loadCommunityProviders();
+  var registry = new Map();
+  for (var i = 0; i < community.length; i++) {
+    var provider = community[i];
+    registry.set(provider.id, provider);
+    var aliases = provider.aliases || [];
+    for (var j = 0; j < aliases.length; j++) registry.set(aliases[j], provider);
+  }
+  var list = Array.from(new Set(registry.values())).map(function (p) {
+    return {
+      id: p.id, name: p.name, description: p.description || '',
+      packManifestUrl: p._packManifestUrl || null, packName: p._packName || null,
+      fuzzyMatch: Boolean(p.fuzzyMatch), supportsAvailability: Boolean(p.supportsAvailability),
+      catalogMode: p.catalogMode || 'tmdb', catalogTypes: p.catalogTypes || [],
+      catalogCategories: p.catalogCategories || [],
+      disableTmdbArtFallback: Boolean(p.disableTmdbArtFallback)
+    };
+  });
+  return { registry: registry, list: list };
+}
+
+// ---------------------------------------------------------------------------
+// LAN address + HLS proxying
+// ---------------------------------------------------------------------------
+
+function lanAddress() {
+  var ifaces = os.networkInterfaces();
+  var candidates = [];
+  var names = Object.keys(ifaces);
+  for (var i = 0; i < names.length; i++) {
+    var list = ifaces[names[i]];
+    for (var j = 0; j < list.length; j++) {
+      var iface = list[j];
+      if (iface.family === 'IPv4' && !iface.internal && iface.address.indexOf('169.254.') !== 0) {
+        candidates.push(iface.address);
+      }
+    }
+  }
+  // Prefer actual private-LAN ranges over anything else (e.g. Docker/VPN adapters).
+  var private192 = candidates.filter(function (a) { return a.indexOf('192.168.') === 0; })[0];
+  var private10 = candidates.filter(function (a) { return a.indexOf('10.') === 0; })[0];
+  var private172 = candidates.filter(function (a) { return /^172\.(1[6-9]|2\d|3[01])\./.test(a); })[0];
+  return private192 || private10 || private172 || candidates[0] || '127.0.0.1';
+}
+
+// `referer`, when a provider supplies one, is threaded through every proxied
+// URL (master playlist, sub-playlists, segments) so the upstream CDN's
+// hotlink protection sees the same Referer on every request in the chain —
+// some hosts 403 anything else, including no Referer at all.
+function proxied(absoluteUrl, referer) {
+  var url = 'http://127.0.0.1:' + PORT + '/hls?url=' + encodeURIComponent(absoluteUrl);
+  if (referer) url += '&ref=' + encodeURIComponent(referer);
+  return url;
+}
+
+function rewritePlaylist(text, baseUrl, referer) {
+  return text.split('\n').map(function (line) {
+    if (line.indexOf('#') === 0) {
+      return line.replace(/URI="([^"]+)"/g, function (_m, uri) {
+        return 'URI="' + proxied(new URL(uri, baseUrl).toString(), referer) + '"';
+      });
+    }
+    var trimmed = line.trim();
+    if (!trimmed) return line;
+    return proxied(new URL(trimmed, baseUrl).toString(), referer);
+  }).join('\n');
+}
+
+// ---------------------------------------------------------------------------
+// Pairing web pages (served to the phone that scans the QR code)
+// ---------------------------------------------------------------------------
+
+function pairingPageShell(title, body) {
+  return '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">\n' +
+    '<title>' + title + '</title>\n' +
+    '<style>\n' +
+    'body{font-family:-apple-system,sans-serif;background:#0a0a0f;color:#fff;padding:24px;max-width:480px;margin:0 auto}\n' +
+    'h1{font-size:20px}p{color:#a1a1aa;font-size:14px;line-height:1.5}\n' +
+    'input{width:100%;padding:12px;border-radius:8px;border:1px solid #333;background:#181824;color:#fff;font-size:15px;box-sizing:border-box;margin-top:12px}\n' +
+    'button{width:100%;padding:12px;border-radius:8px;border:0;background:#e50914;color:#fff;font-size:15px;font-weight:700;margin-top:14px}\n' +
+    '#status{margin-top:16px;font-size:14px;min-height:20px}\n' +
+    '</style></head><body>' + body + '</body></html>';
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+
+function wifiHint(ssid) {
+  return ssid
+    ? '<p style="color:#4ade80;font-size:13px;">📶 TV is on Wi-Fi "<strong>' + escapeHtml(ssid) + '</strong>" — make sure your phone is on the same network.</p>'
+    : '';
+}
+
+function pairingPageHtml(code, valid, kind, ssid) {
+  if (!valid) {
+    return pairingPageShell('TFlix Pairing', '<h1>TFlix Pairing</h1><p>This pairing code has expired or was already used. Go back to TFlix on your TV and generate a new QR code.</p>');
+  }
+
+  if (kind === 'tmdb_key') {
+    return pairingPageShell('TFlix — Add TMDB Key',
+      '<h1>Add Your TMDB API Key</h1>\n' +
+      '<p>Paste or type your personal TMDB API key. It\'s sent directly to your TV over your local network — nothing else sees it.</p>\n' +
+      wifiHint(ssid) + '\n' +
+      '<input id="key" type="text" placeholder="Your TMDB API key" autocapitalize="off" autocorrect="off" spellcheck="false" autofocus>\n' +
+      '<button id="submit">Save to TV</button>\n' +
+      '<div id="status"></div>\n' +
+      '<script>\n' +
+      'document.getElementById(\'submit\').onclick = async () => {\n' +
+      '  const apiKey = document.getElementById(\'key\').value.trim();\n' +
+      '  const status = document.getElementById(\'status\');\n' +
+      '  if (!apiKey) { status.textContent = \'Enter your API key first.\'; return; }\n' +
+      '  status.textContent = \'Sending...\';\n' +
+      '  try {\n' +
+      '    const res = await fetch(\'/pair/submit\', { method: \'POST\', headers: {\'Content-Type\':\'application/json\'}, body: JSON.stringify({ code: \'' + code + '\', apiKey }) });\n' +
+      '    const data = await res.json();\n' +
+      '    if (!res.ok) throw new Error(data.error || \'Failed to send key\');\n' +
+      '    status.textContent = \'Sent! Check your TV — you can close this page.\';\n' +
+      '  } catch (e) {\n' +
+      '    status.textContent = \'Error: \' + e.message;\n' +
+      '  }\n' +
+      '};\n' +
+      '</script>\n'
+    );
+  }
+
+  return pairingPageShell('TFlix Provider Pack',
+    '<h1>Add a TFlix Provider Pack</h1>\n' +
+    '<p>Paste the manifest URL for the provider pack you want to install. This will download and run code from that source on your TV.</p>\n' +
+    wifiHint(ssid) + '\n' +
+    '<input id="url" type="url" placeholder="https://example.com/pack/manifest.json" autofocus>\n' +
+    '<button id="submit">Install</button>\n' +
+    '<div id="status"></div>\n' +
+    '<script>\n' +
+    'document.getElementById(\'submit\').onclick = async () => {\n' +
+    '  const url = document.getElementById(\'url\').value.trim();\n' +
+    '  const status = document.getElementById(\'status\');\n' +
+    '  if (!url) { status.textContent = \'Enter a URL first.\'; return; }\n' +
+    '  status.textContent = \'Installing...\';\n' +
+    '  try {\n' +
+    '    const res = await fetch(\'/pair/submit\', { method: \'POST\', headers: {\'Content-Type\':\'application/json\'}, body: JSON.stringify({ code: \'' + code + '\', url }) });\n' +
+    '    const data = await res.json();\n' +
+    '    if (!res.ok) throw new Error(data.error || \'Install failed\');\n' +
+    '    status.textContent = \'Installed: \' + data.installed.join(\', \') + (data.errors.length ? (\' (failed: \' + data.errors.map(e=>e.id).join(\', \') + \')\') : \'\') + \'. You can close this page.\';\n' +
+    '  } catch (e) {\n' +
+    '    status.textContent = \'Error: \' + e.message;\n' +
+    '  }\n' +
+    '};\n' +
+    '</script>\n'
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Server
+// ---------------------------------------------------------------------------
+
+async function main() {
+  var loaded = loadAllProviders();
+  var registry = loaded.registry;
+  var list = loaded.list;
+  console.log('[hlsRelay] Loaded ' + list.length + ' provider(s): ' + list.map(function (p) { return p.id; }).join(', '));
+
+  var server = http.createServer(function (req, res) {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Headers', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
+    // A synchronous throw anywhere below (e.g. a filesystem error reading
+    // pack config) would otherwise become an unhandled rejection and take
+    // the whole relay process down for every subsequent request too.
+    (async function () {
+      try {
+        var reqUrl;
+        try {
+          reqUrl = new URL(req.url, 'http://127.0.0.1:' + PORT);
+        } catch (e) {
+          res.statusCode = 400;
+          res.end('bad request');
+          return;
+        }
+
+        if (reqUrl.pathname === '/health') {
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ ok: true }));
+          return;
+        }
+
+        if (reqUrl.pathname === '/providers') {
+          res.setHeader('Content-Type', 'application/json');
+          var packsConfig = loadPackConfig();
+          var packsList = Object.keys(packsConfig.packs).map(function (key) {
+            return Object.assign({ key: key }, packsConfig.packs[key]);
+          });
+          res.end(JSON.stringify({ providers: list, packs: packsList }));
+          return;
+        }
+
+        if (reqUrl.pathname === '/resolve') {
+          var providerId = reqUrl.searchParams.get('provider');
+          var provider = registry.get(providerId);
+          res.setHeader('Content-Type', 'application/json');
+          if (!provider) {
+            res.statusCode = 400;
+            res.end(JSON.stringify({ error: 'No provider registered for "' + providerId + '"' }));
+            return;
+          }
+          try {
+            var result = await provider.resolve({
+              tmdbId: reqUrl.searchParams.get('tmdbId'),
+              imdbId: reqUrl.searchParams.get('imdbId') || '',
+              title: reqUrl.searchParams.get('title') || '',
+              year: reqUrl.searchParams.get('year') || '',
+              isTv: reqUrl.searchParams.get('isTv') === '1',
+              season: reqUrl.searchParams.get('season') || '1',
+              episode: reqUrl.searchParams.get('episode') || '1',
+              confirmedShowId: reqUrl.searchParams.get('confirmedShowId') || '',
+              forceConfirm: reqUrl.searchParams.get('forceConfirm') === '1',
+              native: reqUrl.searchParams.get('native') === '1'
+            }, providerHttp);
+
+            // Three possible resolve() outcomes, checked in order:
+            if (result && result.needsConfirmation) {
+              // Ambiguous title match — hand candidates back to the app to
+              // ask the user, rather than proxying/rewriting anything here.
+              res.end(JSON.stringify({
+                needsConfirmation: true,
+                candidates: result.candidates || [],
+                providerName: result.providerName
+              }));
+              return;
+            }
+            if (result && result.embedUrl) {
+              // Resolver couldn't (or chose not to) extract a raw stream —
+              // hand back an iframe-able URL instead. Must NOT go through
+              // proxied(), which rewrites HLS playlists, not HTML pages.
+              res.end(JSON.stringify({
+                embedUrl: result.embedUrl,
+                providerName: result.providerName
+              }));
+              return;
+            }
+            if (!result || !result.streamUrl) {
+              throw new Error('Provider resolve() returned neither streamUrl, embedUrl, nor needsConfirmation');
+            }
+            res.end(JSON.stringify({
+              streamUrl: proxied(result.streamUrl, result.referer),
+              subtitles: (result.subtitles || []).map(function (s) {
+                return Object.assign({}, s, { src: proxied(s.src, result.referer) });
+              }),
+              providerName: result.providerName
+            }));
+          } catch (e) {
+            res.statusCode = 502;
+            res.end(JSON.stringify({ error: e.message || String(e) }));
+          }
+          return;
+        }
+
+        // Episode-availability badges. Only meaningful for a provider that
+        // opted in via supportsAvailability (see docs/PROVIDER_PACKS.md) and
+        // only ever called by the app with an already-*confirmed* showId —
+        // there's nothing useful (or safe) to report against an unconfirmed
+        // guess, so this refuses rather than silently resolving one itself.
+        if (reqUrl.pathname === '/episodes') {
+          var epProviderId = reqUrl.searchParams.get('provider');
+          var epProvider = registry.get(epProviderId);
+          res.setHeader('Content-Type', 'application/json');
+          if (!epProvider) {
+            res.statusCode = 400;
+            res.end(JSON.stringify({ error: 'No provider registered for "' + epProviderId + '"' }));
+            return;
+          }
+          if (!epProvider.supportsAvailability || typeof epProvider.listEpisodes !== 'function') {
+            res.statusCode = 400;
+            res.end(JSON.stringify({ error: epProviderId + ' does not support episode availability' }));
+            return;
+          }
+          var epConfirmedShowId = reqUrl.searchParams.get('confirmedShowId') || '';
+          if (!epConfirmedShowId) {
+            res.statusCode = 400;
+            res.end(JSON.stringify({ error: 'confirmedShowId is required' }));
+            return;
+          }
+          try {
+            var epResult = await epProvider.listEpisodes({ confirmedShowId: epConfirmedShowId }, providerHttp);
+            res.end(JSON.stringify({ episodes: (epResult && epResult.episodes) || [] }));
+          } catch (e) {
+            res.statusCode = 502;
+            res.end(JSON.stringify({ error: e.message || String(e) }));
+          }
+          return;
+        }
+
+        // Native-catalog browse: one page of a catalogMode:'native' provider's
+        // own category listing. See docs/PROVIDER_PACKS.md §listCatalog.
+        if (reqUrl.pathname === '/browse') {
+          var browseProviderId = reqUrl.searchParams.get('provider');
+          var browseProvider = registry.get(browseProviderId);
+          res.setHeader('Content-Type', 'application/json');
+          if (!browseProvider) {
+            res.statusCode = 400;
+            res.end(JSON.stringify({ error: 'No provider registered for "' + browseProviderId + '"' }));
+            return;
+          }
+          if (browseProvider.catalogMode !== 'native' || typeof browseProvider.listCatalog !== 'function') {
+            res.statusCode = 400;
+            res.end(JSON.stringify({ error: browseProviderId + ' does not support native catalog browsing' }));
+            return;
+          }
+          try {
+            var browseCategory = reqUrl.searchParams.get('category') || '';
+            var browsePage = Number(reqUrl.searchParams.get('page')) || 1;
+            var browseResult = await browseProvider.listCatalog(browseCategory, browsePage, providerHttp);
+            res.end(JSON.stringify({
+              items: (browseResult && browseResult.items) || [],
+              hasMore: Boolean(browseResult && browseResult.hasMore)
+            }));
+          } catch (e) {
+            res.statusCode = 502;
+            res.end(JSON.stringify({ error: e.message || String(e) }));
+          }
+          return;
+        }
+
+        // Native-catalog search: text search against a provider's own
+        // catalog. Not merged into TFlix's global TMDB search.
+        if (reqUrl.pathname === '/search-native') {
+          var searchProviderId = reqUrl.searchParams.get('provider');
+          var searchProvider = registry.get(searchProviderId);
+          res.setHeader('Content-Type', 'application/json');
+          if (!searchProvider) {
+            res.statusCode = 400;
+            res.end(JSON.stringify({ error: 'No provider registered for "' + searchProviderId + '"' }));
+            return;
+          }
+          if (searchProvider.catalogMode !== 'native' || typeof searchProvider.search !== 'function') {
+            res.statusCode = 400;
+            res.end(JSON.stringify({ error: searchProviderId + ' does not support native search' }));
+            return;
+          }
+          try {
+            var searchQuery = reqUrl.searchParams.get('q') || '';
+            var searchResult = await searchProvider.search(searchQuery, providerHttp);
+            res.end(JSON.stringify({ items: (searchResult && searchResult.items) || [] }));
+          } catch (e) {
+            res.statusCode = 502;
+            res.end(JSON.stringify({ error: e.message || String(e) }));
+          }
+          return;
+        }
+
+        // Native season list for a native 'tv' item. Missing getSeasons is
+        // NOT an error — an empty list tells the app to flatten straight to
+        // /native-episodes, distinct from "wrong/unregistered provider".
+        if (reqUrl.pathname === '/seasons') {
+          var seasonsProviderId = reqUrl.searchParams.get('provider');
+          var seasonsProvider = registry.get(seasonsProviderId);
+          res.setHeader('Content-Type', 'application/json');
+          if (!seasonsProvider) {
+            res.statusCode = 400;
+            res.end(JSON.stringify({ error: 'No provider registered for "' + seasonsProviderId + '"' }));
+            return;
+          }
+          if (seasonsProvider.catalogMode !== 'native' || typeof seasonsProvider.getSeasons !== 'function') {
+            res.end(JSON.stringify({ seasons: [] }));
+            return;
+          }
+          try {
+            var seasonsNativeId = reqUrl.searchParams.get('nativeId') || '';
+            var seasonsResult = await seasonsProvider.getSeasons(seasonsNativeId, providerHttp);
+            res.end(JSON.stringify({ seasons: (seasonsResult && seasonsResult.seasons) || [] }));
+          } catch (e) {
+            res.statusCode = 502;
+            res.end(JSON.stringify({ error: e.message || String(e) }));
+          }
+          return;
+        }
+
+        // Native episode metadata for browsing (distinct from /episodes'
+        // bare-number availability list — see docs/PROVIDER_PACKS.md §0.5).
+        if (reqUrl.pathname === '/native-episodes') {
+          var neProviderId = reqUrl.searchParams.get('provider');
+          var neProvider = registry.get(neProviderId);
+          res.setHeader('Content-Type', 'application/json');
+          if (!neProvider) {
+            res.statusCode = 400;
+            res.end(JSON.stringify({ error: 'No provider registered for "' + neProviderId + '"' }));
+            return;
+          }
+          if (neProvider.catalogMode !== 'native' || (neProvider.catalogTypes || []).indexOf('tv') === -1 || typeof neProvider.listNativeEpisodes !== 'function') {
+            res.statusCode = 400;
+            res.end(JSON.stringify({ error: neProviderId + ' does not support native episode listing' }));
+            return;
+          }
+          try {
+            var neNativeId = reqUrl.searchParams.get('nativeId') || '';
+            var neSeasonId = reqUrl.searchParams.get('seasonId') || null;
+            var neResult = await neProvider.listNativeEpisodes(neNativeId, neSeasonId, providerHttp);
+            res.end(JSON.stringify({ episodes: (neResult && neResult.episodes) || [] }));
+          } catch (e) {
+            res.statusCode = 502;
+            res.end(JSON.stringify({ error: e.message || String(e) }));
+          }
+          return;
+        }
+
+        if (reqUrl.pathname === '/hls') {
+          var target = reqUrl.searchParams.get('url');
+          var referer = reqUrl.searchParams.get('ref') || undefined;
+          if (!target) {
+            res.statusCode = 400;
+            res.end('missing url');
+            return;
+          }
+          try {
+            await streamProxy(target, referer, req, res);
+          } catch (e) {
+            if (res.headersSent) { res.end(); return; }
+            res.statusCode = 502;
+            res.end('relay error: ' + (e.message || e));
+          }
+          return;
+        }
+
+        // --- Pairing: phone <-> TV provider pack handoff ---
+
+        if (reqUrl.pathname === '/pair/start' && req.method === 'GET') {
+          var kind = reqUrl.searchParams.get('kind') === 'tmdb_key' ? 'tmdb_key' : 'provider_pack';
+          var started = startPairing(kind);
+          var ssidStart = await getWifiSsid();
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ code: started.code, expiresAt: started.expiresAt, pairUrl: 'http://' + lanAddress() + ':' + PORT + '/pair?code=' + started.code, ssid: ssidStart }));
+          return;
+        }
+
+        if (reqUrl.pathname === '/pair/status') {
+          var statusCode = reqUrl.searchParams.get('code') || '';
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify(getPairingStatus(statusCode)));
+          return;
+        }
+
+        if (reqUrl.pathname === '/pair' && req.method === 'GET') {
+          var pairCode = reqUrl.searchParams.get('code') || '';
+          var validCode = isCodeValid(pairCode);
+          var ssidPair = validCode ? await getWifiSsid() : null;
+          res.setHeader('Content-Type', 'text/html');
+          res.end(pairingPageHtml(pairCode, validCode, getPairingKind(pairCode), ssidPair));
+          return;
+        }
+
+        if (reqUrl.pathname === '/pair/submit' && req.method === 'POST') {
+          var chunks = [];
+          req.on('data', function (c) { chunks.push(c); });
+          req.on('end', async function () {
+            res.setHeader('Content-Type', 'application/json');
+            var body = {};
+            try {
+              body = JSON.parse(Buffer.concat(chunks).toString('utf-8') || '{}');
+              if (!isCodeValid(body.code)) {
+                res.statusCode = 403;
+                res.end(JSON.stringify({ error: 'Invalid or expired pairing code' }));
+                return;
+              }
+              var submitKind = getPairingKind(body.code);
+              consumeCode(body.code);
+
+              if (submitKind === 'tmdb_key') {
+                var apiKey = String(body.apiKey || '').trim();
+                if (!apiKey) throw new Error('No API key provided');
+                var keyResult = { apiKey: apiKey };
+                console.log('[hlsRelay] TMDB key received via phone pairing');
+                setPairingResult(body.code, keyResult);
+                res.end(JSON.stringify({ ok: true }));
+                return;
+              }
+
+              var installResult = await installPack(body.url);
+              var reloaded = loadAllProviders();
+              registry = reloaded.registry;
+              list = reloaded.list;
+              console.log('[hlsRelay] Provider pack installed: ' + installResult.name + ' -> ' + installResult.installed.join(', '));
+              setPairingResult(body.code, installResult);
+              res.end(JSON.stringify(installResult));
+            } catch (e) {
+              if (body.code) setPairingResult(body.code, { error: e.message || String(e) });
+              res.statusCode = 400;
+              res.end(JSON.stringify({ error: e.message || String(e) }));
+            }
+          });
+          return;
+        }
+
+        // Direct install: for the webview's own "Browse Packs" UI, installing
+        // from the default catalog — no phone/QR round trip needed since the
+        // request already originates from this device. Gated to loopback only;
+        // a request arriving via the LAN interface (some other device on the
+        // wifi) is rejected and must go through the pairing-code flow instead.
+        if (reqUrl.pathname === '/packs/install' && req.method === 'POST') {
+          var remote = (req.socket.remoteAddress || '').replace('::ffff:', '');
+          if (['127.0.0.1', '::1', 'localhost'].indexOf(remote) === -1) {
+            res.statusCode = 403;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: 'This endpoint is only available to the app running on this device.' }));
+            return;
+          }
+          var installChunks = [];
+          req.on('data', function (c) { installChunks.push(c); });
+          req.on('end', async function () {
+            res.setHeader('Content-Type', 'application/json');
+            try {
+              var installBody = JSON.parse(Buffer.concat(installChunks).toString('utf-8') || '{}');
+              var directResult = await installPack(installBody.url);
+              var directReloaded = loadAllProviders();
+              registry = directReloaded.registry;
+              list = directReloaded.list;
+              console.log('[hlsRelay] Provider pack installed directly: ' + directResult.name + ' -> ' + directResult.installed.join(', '));
+              res.end(JSON.stringify(directResult));
+            } catch (e) {
+              res.statusCode = 400;
+              res.end(JSON.stringify({ error: e.message || String(e) }));
+            }
+          });
+          return;
+        }
+
+        // Removes one installed pack, leaving all others in place. Same
+        // loopback-only gating as /packs/install — this is a local device
+        // settings action, not something a phone-pairing flow needs.
+        if (reqUrl.pathname === '/packs/uninstall' && req.method === 'POST') {
+          var uninstallRemote = (req.socket.remoteAddress || '').replace('::ffff:', '');
+          if (['127.0.0.1', '::1', 'localhost'].indexOf(uninstallRemote) === -1) {
+            res.statusCode = 403;
+            res.setHeader('Content-Type', 'application/json');
+            res.end(JSON.stringify({ error: 'This endpoint is only available to the app running on this device.' }));
+            return;
+          }
+          var uninstallChunks = [];
+          req.on('data', function (c) { uninstallChunks.push(c); });
+          req.on('end', function () {
+            res.setHeader('Content-Type', 'application/json');
+            try {
+              var uninstallBody = JSON.parse(Buffer.concat(uninstallChunks).toString('utf-8') || '{}');
+              if (!uninstallBody.url) throw new Error('Missing url');
+              var removed = uninstallPack(uninstallBody.url);
+              var uninstallReloaded = loadAllProviders();
+              registry = uninstallReloaded.registry;
+              list = uninstallReloaded.list;
+              res.end(JSON.stringify({ removed: removed }));
+            } catch (e) {
+              res.statusCode = 400;
+              res.end(JSON.stringify({ error: e.message || String(e) }));
+            }
+          });
+          return;
+        }
+
+        res.statusCode = 404;
+        res.end('not found');
+      } catch (e) {
+        console.error('[hlsRelay] Unhandled request error:', e && e.stack ? e.stack : e);
+        if (!res.headersSent) {
+          res.statusCode = 500;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ error: 'Internal relay error' }));
+        }
+      }
+    })();
+  });
+
+  server.on('error', function (e) {
+    // Most likely EADDRINUSE from a previous instance that didn't shut down cleanly.
+    console.error('[hlsRelay] Failed to start:', e.message);
+  });
+
+  server.listen(PORT, '0.0.0.0', function () {
+    console.log('[hlsRelay] Listening on http://0.0.0.0:' + PORT + ' (LAN: http://' + lanAddress() + ':' + PORT + ')');
+  });
+}
+
+main().catch(function (e) {
+  console.error('[hlsRelay] Fatal startup error:', e && e.stack ? e.stack : e);
+});
