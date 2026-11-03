@@ -1564,3 +1564,8 @@ html, body {
 [data-c47-gap="8"][data-c47-axis="column"] > * + * { margin-top: 8px; }
 [data-c47-gap="8"][data-c47-axis="row"] > * + * { margin-left: 8px; }
 [data-c47-gap="8"][data-c47-axis="wrap"] > * { margin-right: 8px; margin-bottom: 8px; }
+
+/* Keep the companion and history entries visible on 720p TVs, including Providers. */
+@media (max-height: 800px) {
+  .nav-btn { height: 64px; flex-shrink: 0; }
+}
