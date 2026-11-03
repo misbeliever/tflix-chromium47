@@ -1,3 +1,7 @@
+# Companion address fix — 2.0.5-c47.4
+
+Shows the full companion address as plain text on Mac and TV. Validates private IPv4 addresses without relying on the old TV browser URL constructor; gives separate messages for a missing access key or incorrect protocol/port. Existing companion access keys and the C47.3 Node 4 relay repair are retained. See [setup](companion/README.md). Actual phone-keyboard acceptance remains unverified.
+
 # Relay repair — 2.0.5-c47.3
 
 Fixes the relay's reproducible Node 4.4.3 startup failure. Ships a self-contained ES5 service with older filesystem/HTTP APIs and clearer provider errors. See [evidence, checks and TV test](RELAY-NODE4.md). External provider compatibility and actual TV playback remain unverified. No TMDB/history reset is needed.

@@ -2,6 +2,23 @@ import { storage } from './store/storage.js';
 import { tmdb } from './api/tmdb.js';
 import { nav } from './nav/spatialNav.js';
 
+// Only private IPv4 companion addresses are supported; no browser URL constructor needed.
+export function parseCompanionAddress(value) {
+  let text = String(value || '').trim();
+  if (/^https:\/\//i.test(text)) throw Error('Use http:// for the local Mac companion, not https://.');
+  text = text.replace(/^http:\/\//i, '');
+  if (/^[a-z][a-z0-9+.-]*:/i.test(text)) throw Error('Use http:// followed by the Mac IP address.');
+  const match = /^(\d{1,3}(?:\.\d{1,3}){3})(?::(\d+))?\/?(?:#([^\s]*))?$/.exec(text);
+  if (!match) throw Error('Enter the Mac connection address, for example http://192.168.1.20:18768/#access-key.');
+  const host = match[1], octets = host.split('.').map(Number);
+  const privateHost = host === '127.0.0.1' || octets[0] === 10 || octets[0] === 192 && octets[1] === 168 || octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31;
+  if (!privateHost || octets.some((n, i) => n > 255 || String(n) !== host.split('.')[i])) throw Error('Use your Mac’s private home-network IPv4 address.');
+  if (match[2] && match[2] !== '18768') throw Error('The Mac companion uses port 18768.');
+  if (!match[3]) throw Error('Address recognised. Use Copy connection address on the Mac page to include its access key after #.');
+  if (!/^[a-f0-9]{32}$/i.test(match[3])) throw Error('The access key after # must be the complete 32-character key from the Mac companion.');
+  return {base: 'http://' + host + ':18768', token: match[3].toLowerCase()};
+}
+
 // Connection credentials stay in memory and disappear when TFlix closes.
 export function createCompanion(app) {
   let connection = null, timer = null, generation = 0, results = [], message = 'Ready', serial = 0;
@@ -76,7 +93,7 @@ export function createCompanion(app) {
   }
   function show() {
     const overlay=document.createElement('div'); overlay.className='modal-overlay';
-    overlay.innerHTML='<div class="modal-container" style="max-width:720px;padding:32px"><h2>Mac companion</h2><p style="margin:20px 0">Start the companion on your Mac. Enter its private connection address below. Your watch history and searches are shared only while connected.</p><label for="companion-url">Mac connection address</label><input class="focusable" id="companion-url" type="password" autocomplete="off" spellcheck="false" style="display:block;width:95%;margin:20px 0;padding:12px" placeholder="http://192.168.…:18768/#…"><p id="companion-message" role="status"></p><button class="btn btn-primary focusable" id="companion-connect">Connect</button> <button class="btn btn-secondary focusable" id="companion-disconnect">Disconnect</button> <button class="btn btn-secondary focusable" id="companion-close">Back</button></div>';
+    overlay.innerHTML='<div class="modal-container" style="max-width:720px;padding:32px"><h2>Mac companion</h2><p style="margin:20px 0">Start the companion on your Mac. Copy its complete connection address, including the access key after #. The address stays visible so you can check it. Your watch history and searches are shared only while connected.</p><label for="companion-url">Mac connection address</label><input class="focusable" id="companion-url" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" style="display:block;width:95%;margin:20px 0;padding:12px" placeholder="http://192.168.…:18768/#…"><p id="companion-message" role="status"></p><button class="btn btn-primary focusable" id="companion-connect">Connect</button> <button class="btn btn-secondary focusable" id="companion-disconnect">Disconnect</button> <button class="btn btn-secondary focusable" id="companion-close">Back</button></div>';
     document.body.appendChild(overlay);
     const close=() => {nav.popBackHandler(close);nav.clearScope(overlay);overlay.remove();return true;};
     nav.setScope(overlay);nav.pushBackHandler(close);
@@ -86,9 +103,8 @@ export function createCompanion(app) {
     overlay.querySelector('#companion-disconnect').onclick=() => {disconnect();status.textContent='Disconnected';};
     overlay.querySelector('#companion-connect').onclick=() => {
       try {
-        const url=new URL(overlay.querySelector('#companion-url').value.trim());
-        if (url.protocol!=='http:' || url.port!=='18768' || url.username || url.password || url.search || url.pathname!=='/' || !/^#[a-f0-9]{32}$/.test(url.hash) || !/^(127\.0\.0\.1|10\.(?:\d{1,3}\.){2}\d{1,3}|192\.168\.\d{1,3}\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3})$/.test(url.hostname)) throw Error('Use the exact private address printed on your Mac');
-        disconnect();connection={base:url.origin,token:url.hash.slice(1)};message='Ready';poll(generation);close();
+        const next = parseCompanionAddress(overlay.querySelector('#companion-url').value);
+        disconnect();connection=next;message='Ready';poll(generation);close();
       } catch(e) {status.textContent=e.message;}
     };
   }
