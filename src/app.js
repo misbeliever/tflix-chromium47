@@ -14,10 +14,12 @@ import { ProviderBrowseScreen } from './components/ProviderBrowseScreen.js';
 import { setupTizenShim } from '../dev/tizen-shim.js';
 import { setupTvRemoteSimulator } from '../dev/tv-remote-hud.js';
 import { icon } from './ui/icons.js';
+import { createCompanion } from './companion.js';
 
 class TFlixApp {
   constructor() {
     this.activeTab = 'home';
+    this.companion = createCompanion(this);
     this.appEl = document.getElementById('app');
     this.mainContentEl = null;
     this.navBarEl = null;
@@ -131,6 +133,8 @@ class TFlixApp {
           ${navItem('movies', 'film', 'Movies')}
           ${navItem('tv', 'tv', 'TV Shows')}
           ${navItem('watchlist', 'bookmark', 'Watchlist')}
+          ${navItem('continue', 'clock', 'Continue Watching')}
+          <button class="nav-btn focusable" id="nav-companion-btn">${icon('smartphone', { size: 22 })}<span>Mac companion</span></button>
           <div id="nav-providers-slot"></div>
           <button class="nav-btn focusable" id="nav-search-btn">${icon('search', { size: 22 })}<span>Search</span></button>
           <button class="nav-btn focusable" id="nav-settings-btn">${icon('settings', { size: 22 })}<span>Settings</span></button>
@@ -164,6 +168,7 @@ class TFlixApp {
       this.openSettings();
     });
 
+    this.navBarEl.querySelector('#nav-companion-btn').addEventListener('click', () => this.companion.show());
     this.updateProvidersNavVisibility();
   }
 
@@ -208,7 +213,7 @@ class TFlixApp {
     // docs/PROVIDER_PACKS.md's "Native catalogs" section) — gating the
     // Providers tab behind a TMDB key would defeat the point for a user who
     // doesn't have/want one.
-    if (tab !== 'watchlist' && tab !== 'providers' && !storage.hasApiKey()) {
+    if (tab !== 'watchlist' && tab !== 'continue' && tab !== 'providers' && !storage.hasApiKey()) {
       this.mainContentEl.innerHTML = `
         <div style="padding: 64px 48px; text-align: center; max-width: 650px; margin: 0 auto;">
           <div style="margin-bottom: 16px; color: #e50914;">${icon('key', { size: 54 })}</div>
@@ -241,6 +246,8 @@ class TFlixApp {
         await this.renderMoviesTab();
       } else if (tab === 'tv') {
         await this.renderTvTab();
+      } else if (tab === 'continue') {
+        this.renderContinueTab();
       } else if (tab === 'watchlist') {
         this.renderWatchlistTab();
       } else if (tab === 'providers') {
@@ -440,6 +447,19 @@ class TFlixApp {
       items: topTv,
       onItemSelect: (item) => this.openDetails(item)
     }));
+  }
+
+  renderContinueTab() {
+    this.mainContentEl.innerHTML = '';
+    const container = document.createElement('div');
+    container.style.padding = '64px 48px';
+    if (!storage.getHistory().length) {
+      container.innerHTML = '<h2>Continue Watching</h2><p style="margin-top:24px">Start a movie or episode to find it here.</p>';
+    } else {
+      container.appendChild(createContinueWatchingRow({items: storage.getHistory(),
+        onItemSelect: item => this.resumeHistoryItem(item), onChanged: () => this.renderContinueTab()}));
+    }
+    this.mainContentEl.appendChild(container);
   }
 
   renderWatchlistTab() {
@@ -663,7 +683,11 @@ class TFlixApp {
     // before ever opening a video. Loading it on first actual playback
     // trims that off Tizen's cold-start path; the ~1 network round trip of
     // latency here is invisible next to the modal's own render/mount time.
-    const { PlayerModal } = await import('./components/PlayerModal.js');
+    if (this.playerOpening || this.activePlayer) return;
+    this.playerOpening = true;
+    let PlayerModal;
+    try { ({ PlayerModal } = await import('./components/PlayerModal.js')); }
+    finally { this.playerOpening = false; }
     const modal = new PlayerModal({
       media,
       nativeMode,
@@ -671,6 +695,8 @@ class TFlixApp {
         this.openPlayer(nextMedia, { nativeMode });
       },
       onClose: () => {
+        if (this.activePlayer === modal) this.activePlayer = null;
+        if (this.activeTab === 'continue') this.renderContinueTab();
         if (nativeMode) {
           if (this.activeProviderBrowseScreen) {
             nav.focusFirstAvailable();
@@ -680,6 +706,7 @@ class TFlixApp {
         }
       }
     });
+    this.activePlayer = modal;
     modal.render();
   }
 

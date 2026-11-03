@@ -1,3 +1,7 @@
+# Companion update — 2.0.5-c47.2
+
+Adds a dedicated Continue Watching screen and an opt-in Mac companion for catalog search, saved titles and built-in-player controls. See [setup, checks and limits](companion/README.md). Experimental: real TV/LAN playback controls are not yet verified. Keep the same C47 storage keys; no reset is needed.
+
 # TFlix C47
 
 Experimental Chromium 47 / Samsung Tizen 3.0 compatibility edition of [Zyrecx/TFlix](https://github.com/Zyrecx/TFlix).
@@ -5,7 +9,7 @@ Experimental Chromium 47 / Samsung Tizen 3.0 compatibility edition of [Zyrecx/TF
 TizenBrew → Module Manager → **Add GitHub Module**:
 
 ```text
-misbeliever/tflix-chromium47@2.0.5-c47.1
+misbeliever/tflix-chromium47@main
 ```
 
 Launch **TFlix C47**. Keep your existing working TizenBrew, TizenTube and BrewDocs unchanged. This edition has separate settings/provider state and relay port 47994.

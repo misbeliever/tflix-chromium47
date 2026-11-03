@@ -1,0 +1,21 @@
+<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>TFlix companion</title>
+<style>body{font:18px system-ui;background:#11121a;color:#f5f5f5;max-width:850px;margin:40px auto;padding:20px}button,input{font:inherit;padding:12px;margin:5px;border-radius:8px;border:1px solid #555;background:#252735;color:white}button{cursor:pointer}button:focus,input:focus{outline:3px solid #93c5fd}input{width:65%}section{margin:28px 0}#status{color:#a5b4fc}.item{display:block;width:95%;text-align:left}p{line-height:1.5}</style>
+<h1>TFlix companion</h1><p id="status" role="status">Connecting…</p><p>In TFlix, open <b>Mac companion</b> and enter this page’s private address. Keep this window open.</p>
+<button id="copy">Copy connection address</button><p id="now"></p>
+<section aria-label="Playback"><button data-action="rewind">−10 seconds</button><button data-action="play">Play</button><button data-action="pause">Pause</button><button data-action="forward">+10 seconds</button><button data-action="stop">Close player</button></section>
+<form id="search"><label for="query">Search movies and TV</label><br><input id="query" maxlength="120" required><button>Search</button></form>
+<section><h2>Search results</h2><p>Open a title on the TV, then choose Play with its remote.</p><div id="results"></div></section>
+<section><h2>Continue Watching</h2><div id="history"></div></section>
+<script>
+const token=location.hash.slice(1); history.replaceState(null,'',location.pathname);
+let running=false;
+async function api(route,data){const r=await fetch(route,{method:data?'POST':'GET',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},body:data?JSON.stringify(data):undefined});const v=await r.json();if(!r.ok)throw Error(v.error);return v;}
+async function command(action,extra){try{await api('/command',Object.assign({action},extra));document.getElementById('status').textContent='Sent to TV…';}catch(e){document.getElementById('status').textContent=e.message;}}
+document.getElementById('copy').onclick=async()=>{try{await navigator.clipboard.writeText(location.origin+'/#'+token);document.getElementById('status').textContent='Connection address copied';}catch(e){prompt('Copy this private address',location.origin+'/#'+token);}};
+document.querySelectorAll('[data-action]').forEach(b=>b.onclick=()=>command(b.dataset.action));
+document.getElementById('search').onsubmit=e=>{e.preventDefault();command('search',{query:document.getElementById('query').value});};
+let lastLists='';
+function list(id,items,action){const el=document.getElementById(id);el.textContent='';items.forEach(item=>{const b=document.createElement('button');b.className='item';b.textContent=item.title+(item.detail?' · '+item.detail:'');b.onclick=()=>command(action,{ref:item.ref});el.appendChild(b);});if(!items.length)el.textContent='No titles yet.';}
+async function poll(){if(running)return;running=true;try{const v=await api('/state');document.getElementById('status').textContent=v.connected?('TV connected · '+(v.state.message||'Ready')):'Waiting for TFlix on the TV';document.getElementById('now').textContent=v.state&&v.state.title?'Player: '+v.state.title:'';document.querySelectorAll('[data-action]').forEach(b=>b.disabled=!v.connected||!(v.state&&v.state.playback)&&b.dataset.action!=='stop');const lists=JSON.stringify([v.state&&v.state.results,v.state&&v.state.history]);if(lists!==lastLists){lastLists=lists;list('results',v.state?v.state.results:[],'open');list('history',v.state?v.state.history:[],'resume');}}catch(e){document.getElementById('status').textContent=e.message;}finally{running=false;}}
+poll();setInterval(poll,1500);
+</script></html>
