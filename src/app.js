@@ -125,7 +125,7 @@ class TFlixApp {
       <nav class="sidebar">
         <div class="sidebar-brand">
           <span class="brand-logo">TFLIX</span>
-          <span class="brand-badge">C47.6</span>
+          <span class="brand-badge">C47.7</span>
         </div>
         <div class="nav-links">
           ${navItem('home', 'home', 'Home')}

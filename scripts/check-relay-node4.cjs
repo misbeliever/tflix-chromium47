@@ -20,7 +20,7 @@ const fixture=http.createServer((req,res)=>{
  else if(req.url==='/video/segment.ts'){res.writeHead(206,{'Content-Type':'video/mp2t','Content-Range':'bytes 0-3/4'});res.end('DATA');}
  else{res.statusCode=404;res.end('{}');}
 });
-function request(route,data,extra={}){return new Promise((resolve,reject)=>{const req=http.request({host:'127.0.0.1',port:18770,path:route,method:data?'POST':'GET',headers:{Origin:'http://127.0.0.1:8081','Content-Type':'application/json',...extra}},res=>{let text='';res.on('data',x=>text+=x);res.on('end',()=>{let body;try{body=JSON.parse(text)}catch{body=text}resolve({code:res.statusCode,body,headers:res.headers})});});req.setTimeout(1500,()=>req.destroy(Error('timeout')));req.on('error',reject);req.end(data?JSON.stringify(data):undefined);});}
+function request(route,data,extra={}){return new Promise((resolve,reject)=>{const req=http.request({host:'127.0.0.1',port:18770,path:route,method:extra['Access-Control-Request-Method']?'OPTIONS':data?'POST':'GET',headers:{Origin:'http://127.0.0.1:8081','Content-Type':'application/json',...extra}},res=>{let text='';res.on('data',x=>text+=x);res.on('end',()=>{let body;try{body=JSON.parse(text)}catch{body=text}resolve({code:res.statusCode,body,headers:res.headers})});});req.setTimeout(1500,()=>req.destroy(Error('timeout')));req.on('error',reject);req.end(data?JSON.stringify(data):undefined);});}
 (async()=>{
  await new Promise(resolve=>fixture.listen(18771,'127.0.0.1',resolve));
  const child=cp.spawn(runtime,[harness],{stdio:['ignore','pipe','pipe']});
@@ -29,6 +29,10 @@ function request(route,data,extra={}){return new Promise((resolve,reject)=>{cons
   let health;
   for(let i=0;i<200;i++){if(child.exitCode!==null)break;try{health=await request('/health');break;}catch{await new Promise(r=>setTimeout(r,50));}}
   assert(health && health.code===200 && health.body.ok,'REPRO: Local relay Not reachable / provider install Failed to fetch.\n'+logs.slice(-2000));
+  const preflight=await request('/packs/install',null,{'Access-Control-Request-Method':'POST','Access-Control-Request-Headers':'content-type'});
+  assert.equal(preflight.code,204);
+  assert(preflight.headers['access-control-allow-headers'].toLowerCase().split(',').map(x=>x.trim()).includes('content-type'),'REPRO: Chromium 47 blocks JSON install: preflight must explicitly allow Content-Type, not wildcard');
+  assert.equal(preflight.headers['access-control-allow-origin'],'http://127.0.0.1:8081');
   assert.equal((await request('/health',null,{Origin:'https://untrusted.example'})).code,403);
   assert.equal((await request('/pair/start',null,{'x-test-remote':'192.168.50.99'})).code,403);
   const providers=await request('/providers');assert.equal(providers.code,200);assert(Array.isArray(providers.body.providers));

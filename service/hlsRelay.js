@@ -715,7 +715,8 @@ async function main() {
       res.statusCode = 403; res.end('Origin not allowed'); return;
     }
     if (origin) { res.setHeader('Access-Control-Allow-Origin', origin); res.setHeader('Vary', 'Origin'); }
-    res.setHeader('Access-Control-Allow-Headers', '*');
+    // Chromium 47 does not support wildcard allowed headers on JSON preflights.
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Range');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
 
     if (req.method === 'OPTIONS') {

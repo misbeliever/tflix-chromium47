@@ -1,3 +1,7 @@
+# Provider install preflight — 2.0.5-c47.7
+
+The TV relay now answers its health endpoint successfully. Provider-install JSON requests were still blocked because the relay used a wildcard Access-Control-Allow-Headers value that Chromium 47 does not support. This release explicitly allows Content-Type and Range; Origin and loopback restrictions remain enforced. See [evidence and upgrade steps](C47.7-NOTES.md). Actual provider installation/playback still needs a TV test.
+
 # Relay VM startup and visible address — 2.0.5-c47.6
 
 Fixes a Node 4 startup failure reproduced after matching TizenBrew’s copied host globals. The earlier C47.3–C47.5 test sandbox missed this condition. Makes the Mac address explicitly readable and repeats its value below the input. The sidebar and module name show C47.6 so an old cached build is easy to identify. See [checks and upgrade steps](C47.6-NOTES.md). Existing TMDB/history/pairing storage keys are retained; the C47.5 Mac companion remains compatible. Actual TV relay startup and provider playback still require a device test.
