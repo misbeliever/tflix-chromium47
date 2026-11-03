@@ -1,3 +1,7 @@
+# Relay VM startup and visible address — 2.0.5-c47.6
+
+Fixes a Node 4 startup failure reproduced after matching TizenBrew’s copied host globals. The earlier C47.3–C47.5 test sandbox missed this condition. Makes the Mac address explicitly readable and repeats its value below the input. The sidebar and module name show C47.6 so an old cached build is easy to identify. See [checks and upgrade steps](C47.6-NOTES.md). Existing TMDB/history/pairing storage keys are retained; the C47.5 Mac companion remains compatible. Actual TV relay startup and provider playback still require a device test.
+
 # Exit and remembered pairing — 2.0.5-c47.5
 
 Returns TizenBrew-hosted modules through the host's history route instead of silently trusting window.close. Pair the TV once using the plain Mac address and approve its matching code on Mac; credentials are remembered across restarts. See [release notes and checks](C47.5-NOTES.md) and [companion setup](companion/README.md). Actual TV exit and remembered pairing still require a device test. Existing C47 TMDB key/history are retained.

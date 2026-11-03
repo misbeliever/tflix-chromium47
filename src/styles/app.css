@@ -1569,3 +1569,17 @@ html, body {
 @media (max-height: 800px) {
   .nav-btn { height: 64px; flex-shrink: 0; }
 }
+
+/* Explicit old-TV input colours: avoid inherited/native form-control text disappearing. */
+.companion-address {
+  background: #16161f !important;
+  color: #f4f4f5 !important;
+  -webkit-text-fill-color: #f4f4f5 !important;
+  -webkit-text-security: none !important;
+  -webkit-user-select: text;
+  user-select: text;
+  border: 2px solid #71717a;
+  border-radius: 8px;
+  font: 20px monospace;
+  opacity: 1;
+}

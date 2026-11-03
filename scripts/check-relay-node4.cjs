@@ -9,7 +9,7 @@ fs.writeFileSync(harness,`var fs=require('fs'),vm=require('vm'),http=require('ht
 var realCreate=http.createServer;http.createServer=function(fn){var s=realCreate(function(req,res){Object.defineProperty(req.socket,'remoteAddress',{value:req.headers['x-test-remote']||'127.0.0.1',configurable:true});fn(req,res)});var listen=s.listen;s.listen=function(port,host,cb){return listen.call(s,18770,'127.0.0.1',cb);};return s;};
 https.request=function(options,cb){options=Object.assign({},options,{protocol:'http:',hostname:'127.0.0.1',host:'127.0.0.1',port:18771});return http.request(options,cb)};
 os.tmpdir=function(){return ${JSON.stringify(temp)}};
-vm.runInNewContext(fs.readFileSync(${JSON.stringify(path.join(root,file))},'utf8'),{require:require,process:process,console:console,setTimeout:setTimeout,clearTimeout:clearTimeout,setInterval:setInterval,clearInterval:clearInterval},{filename:'TFlix-service.js'});`);
+var sandbox={};Object.getOwnPropertyNames(global).forEach(function(name){if(['services','module','global','inDebug','currentClient','currentModule'].indexOf(name)<0)sandbox[name]=global[name];});sandbox.require=require;sandbox.module={exports:{}};\nvm.runInNewContext(fs.readFileSync(${JSON.stringify(path.resolve(root,file))},'utf8'),sandbox,{filename:'TFlix-service.js'});`);
 const fixture=http.createServer((req,res)=>{
  res.setHeader('Content-Type','application/json');
  if(req.url.endsWith('/manifest.json')) {

@@ -2,7 +2,7 @@
 
 The companion controls TFlix while that app is open. The separate native TV Remote Mac controls the TV independently.
 
-1. Update TFlix C47 to version 2.0.5-c47.5 without resetting data.
+1. Update TFlix C47 to version 2.0.5-c47.6 without resetting data.
 2. Stop the old Mac companion with Control+C. Unzip this package and open Start.command. The companion requires Node 18+ on Mac; no npm install is needed.
 3. Open the private **Mac** URL printed in Terminal. Enter the plain **TV address** shown on that page in TFlix → Mac companion. There is no key to type.
 4. Select Connect / Pair on TV. Compare its six-digit code with the Mac page's request, then click Approve on Mac.

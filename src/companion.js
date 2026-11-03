@@ -109,7 +109,7 @@ export function createCompanion(app) {
   }
   function show() {
     const overlay=document.createElement('div'); overlay.className='modal-overlay';
-    overlay.innerHTML='<div class="modal-container" style="max-width:720px;padding:32px"><h2>Mac companion</h2><p style="margin:20px 0">Enter the Mac address once, then approve the matching code on the Mac page. Your TV reconnects automatically next time. Watch history and searches are shared while connected.</p><label for="companion-url">Mac address</label><input class="focusable" id="companion-url" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" style="display:block;width:95%;margin:20px 0;padding:12px" placeholder="http://192.168.…:18768/"><p id="companion-message" role="status"></p><button class="btn btn-primary focusable" id="companion-connect">Connect / Pair</button> <button class="btn btn-secondary focusable" id="companion-disconnect">Disconnect</button> <button class="btn btn-secondary focusable" id="companion-forget">Forget pairing</button> <button class="btn btn-secondary focusable" id="companion-close">Back</button></div>';
+    overlay.innerHTML='<div class="modal-container" style="max-width:720px;padding:32px"><h2>Mac companion</h2><p style="margin:20px 0">Enter the Mac address once, then approve the matching code on the Mac page. Your TV reconnects automatically next time. Watch history and searches are shared while connected.</p><label for="companion-url">Mac address</label><input class="focusable companion-address" id="companion-url" type="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" style="display:block;width:95%;margin:20px 0;padding:12px" placeholder="http://192.168.…:18768/"><p id="companion-address-readout" style="color:#f4f4f5;word-break:break-all;margin-bottom:16px" aria-live="polite"></p><p id="companion-message" role="status"></p><button class="btn btn-primary focusable" id="companion-connect">Connect / Pair</button> <button class="btn btn-secondary focusable" id="companion-disconnect">Disconnect</button> <button class="btn btn-secondary focusable" id="companion-forget">Forget pairing</button> <button class="btn btn-secondary focusable" id="companion-close">Back</button></div>';
     document.body.appendChild(overlay);
     let open=true, pairTimer=null, attempt=0, pending=null;
     function cancelPair() {
@@ -123,6 +123,10 @@ export function createCompanion(app) {
     nav.setScope(overlay);nav.pushBackHandler(close);
     const status=overlay.querySelector('#companion-message'),input=overlay.querySelector('#companion-url'),button=overlay.querySelector('#companion-connect');
     const saved=remembered(); input.value=connection ? connection.base+'/' : saved ? saved.base+'/' : '';
+    input.type='text';
+    const readout=overlay.querySelector('#companion-address-readout');
+    const showAddress=() => { readout.textContent='Address: '+(input.value || '(not entered)'); };
+    input.addEventListener('input',showAddress);input.addEventListener('change',showAddress);showAddress();
     status.textContent=connection ? message : saved ? 'Saved pairing. Connect to resume, or reopen TFlix to reconnect automatically.' : 'Not paired';
     overlay.querySelector('#companion-close').onclick=close;
     overlay.querySelector('#companion-disconnect').onclick=() => {cancelPair();button.disabled=false;disconnect();status.textContent='Disconnected. Pairing is saved for the next launch.';};
