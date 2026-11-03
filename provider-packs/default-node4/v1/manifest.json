@@ -1,0 +1,17 @@
+{
+  "name": "TFlix Default Pack — Node 4 compatibility",
+  "providers": [
+    {
+      "id": "videasy-direct",
+      "file": "videasy.js"
+    },
+    {
+      "id": "vaplayer-direct",
+      "file": "vaplayer.js"
+    },
+    {
+      "id": "vixsrc-direct",
+      "file": "vixsrc.js"
+    }
+  ]
+}
