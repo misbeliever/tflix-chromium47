@@ -411,22 +411,14 @@ class SpatialNavigationManager {
     this.exitApp();
   }
 
-  /**
-   * Actually terminates the app — call only after the user has confirmed.
-   * Returns true if an exit mechanism was actually invoked, false if none
-   * was available (so the caller can at least close its own UI rather than
-   * leave a "did nothing" dialog on screen).
-   *
-   * window.tizen is the real Tizen Web API and is the only mechanism
-   * guaranteed to actually terminate the app — but it is NOT reliably
-   * present here: TizenBrew doesn't expose it to dynamically-loaded npm
-   * modules (see the desktop-shim detection bug this app previously had).
-   * window.close() is tried as a fallback on the chance the host webview
-   * honors it, but most browsers only allow it on script-opened windows,
-   * so it may be a no-op. TizenBrew currently documents no module-level
-   * "close/return to module list" API to call instead.
-   */
+  // TizenBrew 2.0.5 launches modules with location.href and returns via history.back.
   exitApp() {
+    const location = window.location;
+    if (location && /^http:\/\/(127\.0\.0\.1|localhost):8081$/.test(location.origin) &&
+        (location.pathname || '').indexOf('/module/') === 0 && window.history && window.history.length > 1) {
+      window.history.back();
+      return true;
+    }
     if (window.tizen && window.tizen.application) {
       try {
         window.tizen.application.getCurrentApplication().exit();
@@ -434,12 +426,6 @@ class SpatialNavigationManager {
       } catch (e) {
         console.warn('tizen.application.exit() failed:', e);
       }
-    }
-    try {
-      window.close();
-      return true;
-    } catch (e) {
-      console.warn('window.close() failed:', e);
     }
     return false;
   }

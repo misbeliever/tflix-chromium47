@@ -1,3 +1,7 @@
+# Exit and remembered pairing — 2.0.5-c47.5
+
+Returns TizenBrew-hosted modules through the host's history route instead of silently trusting window.close. Pair the TV once using the plain Mac address and approve its matching code on Mac; credentials are remembered across restarts. See [release notes and checks](C47.5-NOTES.md) and [companion setup](companion/README.md). Actual TV exit and remembered pairing still require a device test. Existing C47 TMDB key/history are retained.
+
 # Companion address fix — 2.0.5-c47.4
 
 Shows the full companion address as plain text on Mac and TV. Validates private IPv4 addresses without relying on the old TV browser URL constructor; gives separate messages for a missing access key or incorrect protocol/port. Existing companion access keys and the C47.3 Node 4 relay repair are retained. See [setup](companion/README.md). Actual phone-keyboard acceptance remains unverified.

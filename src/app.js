@@ -95,13 +95,12 @@ class TFlixApp {
 
     this.exitModalEl.querySelector('#exit-confirm-cancel').addEventListener('click', () => this.closeExitConfirm());
     this.exitModalEl.querySelector('#exit-confirm-ok').addEventListener('click', () => {
-      // Always close our own dialog: if an exit mechanism actually works,
-      // the whole page/context is about to go away anyway and this is
-      // moot; if none is available in this environment (see nav.exitApp()),
-      // the dialog must not just sit there looking stuck.
-      const exited = nav.exitApp();
-      if (!exited) console.warn('[App] No exit mechanism available in this environment.');
-      this.closeExitConfirm();
+      if (nav.exitApp()) {
+        this.companion.disconnect();
+        this.closeExitConfirm();
+      } else {
+        this.exitModalEl.querySelector('p').textContent = 'The TV host did not provide an exit route. Press Home on the TV remote to leave TFlix.';
+      }
     });
   }
 

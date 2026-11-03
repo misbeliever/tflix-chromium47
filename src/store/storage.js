@@ -5,6 +5,7 @@
 
 const STORAGE_KEYS = {
   TMDB_API_KEY: 'tflix_c47_tmdb_api_key',
+  COMPANION: 'tflix_c47_companion',
   WATCH_HISTORY: 'tflix_c47_watch_history',
   WATCHLIST: 'tflix_c47_watchlist',
   DEFAULT_PROVIDER: 'tflix_c47_default_provider',
@@ -19,6 +20,12 @@ const STORAGE_KEYS = {
 const EPISODE_AVAILABILITY_TTL_MS = 24 * 60 * 60 * 1000;
 
 export const storage = {
+  getCompanion() {
+    try { return JSON.parse(localStorage.getItem(STORAGE_KEYS.COMPANION) || 'null'); }
+    catch { return null; }
+  },
+  setCompanion(value) { localStorage.setItem(STORAGE_KEYS.COMPANION, JSON.stringify(value)); },
+  forgetCompanion() { localStorage.removeItem(STORAGE_KEYS.COMPANION); },
   getApiKey() {
     return localStorage.getItem(STORAGE_KEYS.TMDB_API_KEY) || '';
   },

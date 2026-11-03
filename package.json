@@ -1,7 +1,7 @@
 {
   "name": "tflix-chromium47",
   "appName": "TFlix C47",
-  "version": "2.0.5-c47.4",
+  "version": "2.0.5-c47.5",
   "description": "TFlix is a 10-foot streaming web app for Samsung Smart TVs running TizenBrew, featuring TMDB discovery and multi-embed streaming.",
   "packageType": "app",
   "appPath": "dist/index.html",
@@ -14,7 +14,7 @@
     "build": "node scripts/build-relay.cjs && vite build",
     "preview": "vite preview",
     "prepublishOnly": "npm run build",
-    "test": "node scripts/check-compat.cjs",
+    "test": "node scripts/check-compat.cjs && node scripts/check-exit.cjs",
     "test:companion": "node companion/check.cjs",
     "test:relay-node4": "node scripts/check-relay-node4.cjs"
   },

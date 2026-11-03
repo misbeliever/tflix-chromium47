@@ -1,0 +1,15 @@
+const assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm'),path=require('node:path');
+const source=fs.readFileSync(path.join(__dirname,'../src/nav/spatialNav.js'),'utf8').replace(/export const /g,'const ');
+let closed=0;
+const window={close:()=>{closed++;},location:{origin:'http://127.0.0.1:8081',assign:()=>{}},top:null};window.top=window;
+const nav=vm.runInNewContext(source+'\nnav',{window,console});
+assert.equal(nav.exitApp(),false,'REPRO: browser window.close() silently does nothing but exitApp reports success');
+assert.equal(closed,0,'Do not call an unverified window.close fallback');
+let back=0,exit=0;
+window.location.pathname='/module/gh%2Fexample/dist/index.html';window.history={length:2,back:()=>back++};
+assert.equal(nav.exitApp(),true);assert.equal(back,1);
+window.location.origin='https://unrelated.example';assert.equal(nav.exitApp(),false);assert.equal(back,1);
+window.location.origin='http://127.0.0.1:8081';window.history.length=1;assert.equal(nav.exitApp(),false);
+window.tizen={application:{getCurrentApplication:()=>({exit:()=>exit++})}};
+assert.equal(nav.exitApp(),true);assert.equal(exit,1);
+console.log('PASS: TizenBrew module return, direct Tizen exit, no-history/other-origin rejection and no window.close false success');
