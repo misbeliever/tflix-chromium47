@@ -1,3 +1,7 @@
+# Update for C47.3
+
+The Node 4 relay compatibility limitation described below was reproduced and repaired in C47.3. See [RELAY-NODE4.md](RELAY-NODE4.md). The older install identifier and Node-12 relay description below document C47.1, not the current serviceFile. External providers remain untransformed and require separate compatibility checks.
+
 # TFlix C47 — experimental Tizen 3.0 edition
 
 Target: Samsung UE65MU8002 (2017), Chromium 47. Based on

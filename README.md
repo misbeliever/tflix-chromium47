@@ -1,3 +1,7 @@
+# Relay repair — 2.0.5-c47.3
+
+Fixes the relay's reproducible Node 4.4.3 startup failure. Ships a self-contained ES5 service with older filesystem/HTTP APIs and clearer provider errors. See [evidence, checks and TV test](RELAY-NODE4.md). External provider compatibility and actual TV playback remain unverified. No TMDB/history reset is needed.
+
 # Companion update — 2.0.5-c47.2
 
 Adds a dedicated Continue Watching screen and an opt-in Mac companion for catalog search, saved titles and built-in-player controls. See [setup, checks and limits](companion/README.md). Experimental: real TV/LAN playback controls are not yet verified. Keep the same C47 storage keys; no reset is needed.

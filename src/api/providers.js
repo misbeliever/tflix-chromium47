@@ -116,11 +116,12 @@ export async function fetchPackCatalog(indexUrl = DEFAULT_PACK_INDEX_URL) {
  * you by someone else.
  */
 export async function installPackDirect(manifestUrl) {
-  const res = await fetch(`${RELAY_BASE}/packs/install`, {
+  let res;
+  try { res = await fetch(`${RELAY_BASE}/packs/install`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ url: manifestUrl })
-  });
+  }); } catch (error) { throw new Error('Local relay is not reachable. Recheck it in Settings before installing providers.'); }
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || 'Install failed');
   await refreshRelayProviders();

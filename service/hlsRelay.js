@@ -27,7 +27,11 @@
  *     helper code has to live in this file, not a separate module.
  *   - No `__dirname`/`__filename` — those are only injected by Node's
  *     normal CommonJS module wrapper, which `vm.runInContext` bypasses.
- *   - Confirmed live on-device: the sandbox's `process.version` is v12.4.0
+ *   - Upstream targets Node 12.4.0; this TV reports Node 4.4.3. The shipped
+ *     serviceFile is the generated hlsRelay-node4.js bundle. This SOURCE uses
+ *     newer syntax for maintainability; do not set it as serviceFile.
+ *     External provider files are not transformed by that build.
+ *     Upstream's documented sandbox version is v12.4.0
  *     (Tizen's bundled Node), so ES2019-ish syntax (async/await, object
  *     spread, optional catch binding, template literals) is fine, but
  *     optional chaining (`?.`), nullish coalescing (`??`), `crypto.randomInt`
@@ -56,7 +60,18 @@ var os = require('os');
 var fs = require('fs');
 var path = require('path');
 var crypto = require('crypto');
-var URL = require('url').URL;
+var Buffer = require('buffer').Buffer;
+var legacyUrl = require('url');
+var URL = legacyUrl.URL || require('core-js/web/url');
+
+function mkdirp(dir) {
+  try { fs.mkdirSync(dir, 448); } catch (e) {
+    if (e.code === 'EEXIST' && fs.statSync(dir).isDirectory()) return;
+    if (e.code !== 'ENOENT') throw e;
+    mkdirp(path.dirname(dir));
+    fs.mkdirSync(dir, 448);
+  }
+}
 
 var PORT = 47994;
 // Installed provider packs must live outside the package's own install
@@ -101,7 +116,9 @@ function fetchRaw(targetUrl, opts, redirects) {
     if (body !== undefined && reqHeaders['Content-Length'] === undefined) {
       reqHeaders['Content-Length'] = Buffer.byteLength(typeof body === 'string' ? body : String(body));
     }
-    var req = lib.request(u, { method: method, headers: reqHeaders }, function (res) {
+    var requestOptions = legacyUrl.parse(u.toString());
+    requestOptions.method = method; requestOptions.headers = reqHeaders;
+    var req = lib.request(requestOptions, function (res) {
       if ([301, 302, 303, 307, 308].indexOf(res.statusCode) !== -1 && res.headers.location && redirects > 0) {
         res.resume();
         var nextUrl = new URL(res.headers.location, targetUrl).toString();
@@ -148,7 +165,9 @@ function streamProxy(targetUrl, referer, clientReq, res, redirects) {
     var lib = u.protocol === 'http:' ? http : https;
     var reqHeaders = Object.assign({ 'User-Agent': DESKTOP_UA }, referer ? { Referer: referer } : {});
     if (clientReq.headers['range']) reqHeaders['Range'] = clientReq.headers['range'];
-    var req = lib.request(u, { method: 'GET', headers: reqHeaders }, function (upstream) {
+    var requestOptions = legacyUrl.parse(u.toString());
+    requestOptions.method = 'GET'; requestOptions.headers = reqHeaders;
+    var req = lib.request(requestOptions, function (upstream) {
       if ([301, 302, 303, 307, 308].indexOf(upstream.statusCode) !== -1 && upstream.headers.location && redirects > 0) {
         upstream.resume();
         var nextUrl = new URL(upstream.headers.location, targetUrl).toString();
@@ -231,7 +250,7 @@ function generatePairingCode() {
   // crypto.randomInt needs Node 14.10+; this sandbox runs v12.4.0. randomBytes
   // has been available since early Node and gives an equivalent CSPRNG source.
   var n = crypto.randomBytes(4).readUInt32BE(0) % 1000000;
-  return String(n).padStart(6, '0');
+  return ('000000' + n).slice(-6);
 }
 
 function startPairing(kind) {
@@ -300,8 +319,8 @@ async function getWifiSsid() {
 // ---------------------------------------------------------------------------
 
 function ensurePackDirs() {
-  fs.mkdirSync(COMMUNITY_DIR, { recursive: true });
-  fs.mkdirSync(path.dirname(PACK_CONFIG_PATH), { recursive: true });
+  mkdirp(COMMUNITY_DIR);
+  mkdirp(path.dirname(PACK_CONFIG_PATH));
 }
 
 function isSafeManifestUrl(url) {
@@ -399,7 +418,7 @@ async function installPack(manifestUrl) {
 
   ensurePackDirs();
   var dir = packDirFor(manifestUrl);
-  fs.mkdirSync(dir, { recursive: true });
+  mkdirp(dir);
   clearDirFiles(dir);
 
   // Optional `manifest.shared` — plain filenames (e.g. "hosts.js") fetched
@@ -430,7 +449,7 @@ async function installPack(manifestUrl) {
   for (var i = 0; i < manifest.providers.length; i++) {
     var entry = manifest.providers[i];
     try {
-      if (!entry || !entry.id || !entry.file) throw new Error('manifest entry missing id/file');
+      if (!entry || typeof entry.id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,79}$/.test(entry.id) || !entry.file) throw new Error('manifest entry missing or invalid id/file');
       var fileUrl = new URL(entry.file, url).toString();
       var code = await fetchText(fileUrl);
       var destPath = path.join(dir, entry.id + '.js');
@@ -446,10 +465,12 @@ async function installPack(manifestUrl) {
       }
       installed.push(entry.id);
     } catch (e) {
-      errors.push({ id: (entry && entry.id) || '(unknown)', error: e.message || String(e) });
+      var reason = e && e.name === 'SyntaxError' ? 'Provider JavaScript is incompatible with this Node runtime (' + process.version + '); an older-runtime build of the pack is required.' : e.message || String(e);
+      errors.push({ id: (entry && entry.id) || '(unknown)', error: reason });
     }
   }
 
+  if (!installed.length && errors.length) throw new Error('No providers loaded. ' + errors[0].error);
   var config = loadPackConfig();
   config.packs[packKey(manifestUrl)] = {
     manifestUrl: manifestUrl,
@@ -484,7 +505,9 @@ function loadCommunityProviders() {
   var found = [];
   if (!fs.existsSync(COMMUNITY_DIR)) return found;
   var config = loadPackConfig();
-  var entries = fs.readdirSync(COMMUNITY_DIR, { withFileTypes: true });
+  var entries = fs.readdirSync(COMMUNITY_DIR).map(function (name) {
+    return { name: name, isDirectory: function () { return fs.lstatSync(path.join(COMMUNITY_DIR, name)).isDirectory(); } };
+  });
   for (var e = 0; e < entries.length; e++) {
     if (!entries[e].isDirectory()) continue; // skip stray files from the pre-multi-pack layout
     var packEntry = config.packs[entries[e].name];
@@ -514,7 +537,7 @@ function loadCommunityProviders() {
 
 function loadAllProviders() {
   try {
-    fs.mkdirSync(COMMUNITY_DIR, { recursive: true });
+    mkdirp(COMMUNITY_DIR);
   } catch (e) {
     // Degrade to "no community providers" rather than take the whole relay
     // down — this only blocks pack installs, not builtin providers/playback.
@@ -686,7 +709,12 @@ async function main() {
   console.log('[hlsRelay] Loaded ' + list.length + ' provider(s): ' + list.map(function (p) { return p.id; }).join(', '));
 
   var server = http.createServer(function (req, res) {
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    var origin = req.headers.origin;
+    var ownOrigin = 'http://' + lanAddress() + ':' + PORT;
+    if (origin && ['http://127.0.0.1:8081', 'http://localhost:5173', 'http://127.0.0.1:5173', ownOrigin, 'http://127.0.0.1:' + PORT].indexOf(origin) === -1) {
+      res.statusCode = 403; res.end('Origin not allowed'); return;
+    }
+    if (origin) { res.setHeader('Access-Control-Allow-Origin', origin); res.setHeader('Vary', 'Origin'); }
     res.setHeader('Access-Control-Allow-Headers', '*');
     res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
 
@@ -708,6 +736,11 @@ async function main() {
           res.statusCode = 400;
           res.end('bad request');
           return;
+        }
+
+        var localAddress = (req.socket.remoteAddress || '').replace('::ffff:', '');
+        if (['/pair/start', '/pair/status'].indexOf(reqUrl.pathname) !== -1 && localAddress !== '127.0.0.1' && localAddress !== '::1') {
+          res.statusCode = 403; res.end('Pairing controls are local to the TV app'); return;
         }
 
         if (reqUrl.pathname === '/health') {

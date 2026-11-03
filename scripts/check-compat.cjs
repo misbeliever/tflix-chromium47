@@ -5,7 +5,12 @@ const acorn = require('acorn');
 const path = require('node:path');
 const root = path.resolve(__dirname, '..');
 const read = name => fs.readFileSync(path.join(root, name), 'utf8');
+for (const file of fs.readdirSync(path.join(root,'src'),{recursive:true}).filter(f=>f.endsWith('.js'))) {
+ acorn.parse(read('src/'+file),{ecmaVersion:'latest',sourceType:'module'});
+}
 acorn.parse(read('service/hlsRelay.js'), {ecmaVersion:2019});
+acorn.parse(read('service/hlsRelay-node4.js'), {ecmaVersion:5});
+assert.equal(JSON.parse(read('package.json')).serviceFile,'service/hlsRelay-node4.js');
 const html = read('dist/index.html');
 assert(/<script\b(?![^>]*type=["']module)[^>]*(?:src=|nomodule)/i.test(html), 'BLACK-SCREEN REPRO: Chromium 47 needs a classic-script entry');
 const legacyFiles = fs.readdirSync(path.join(root, 'dist/assets')).filter(f => f.endsWith('-legacy.js'));
